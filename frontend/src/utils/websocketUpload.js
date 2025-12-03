@@ -15,24 +15,34 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
       let fileId = null;
       let totalPieces = 0;
       let pieceSize = 0; // Store pieceSize for use in chunkHandler
+      const fileName = file.name; // Capture filename to avoid closure issues
 
       // Initialize upload
       wsClient.send('UPLOAD_INIT', {
-        filename: file.name,
+        filename: fileName,
         size: fileSize,
         mimeType: file.type || 'application/octet-stream'
       });
 
-      // Handle upload init success
+      // Handle upload init success - scoped to this specific file
       const initHandler = (payload) => {
-        fileId = payload.fileId;
+        // If we already have a fileId, only handle if it matches
+        if (fileId && payload.fileId !== fileId) {
+          return; // Not our file
+        }
+        
+        // Set fileId from payload (first time)
+        if (!fileId) {
+          fileId = payload.fileId;
+        }
+        
         totalPieces = payload.totalPieces;
         pieceSize = payload.pieceSize; // Store pieceSize in outer scope
         
         if (onFileStart) {
           onFileStart({
             id: fileId,
-            filename: file.name,
+            filename: fileName,
             size: fileSize,
             totalPieces: payload.totalPieces,
             pieceSize: payload.pieceSize,
@@ -46,8 +56,13 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
 
       wsClient.on('UPLOAD_INIT_SUCCESS', initHandler);
 
-      // Handle chunk upload success
+      // Handle chunk upload success - scoped to this specific file
       const chunkHandler = (payload) => {
+        // Only handle chunks for this specific file
+        if (!fileId || payload.fileId !== fileId) {
+          return; // Not our file
+        }
+        
         uploadedChunks = payload.uploadedChunks;
         const progress = totalPieces > 0 ? (uploadedChunks / totalPieces) * 100 : 0;
         
@@ -67,7 +82,7 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
         
         if (onProgress) {
           onProgress({
-            filename: file.name,
+            filename: fileName,
             progress: Math.round(progress),
             loaded: uploadedChunks,
             total: totalPieces,
@@ -80,8 +95,13 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
 
       wsClient.on('UPLOAD_CHUNK_SUCCESS', chunkHandler);
 
-      // Handle upload complete
+      // Handle upload complete - scoped to this specific file
       const completeHandler = (payload) => {
+        // Only handle completion for this specific file
+        if (!fileId || payload.fileId !== fileId) {
+          return; // Not our file
+        }
+        
         wsClient.off('UPLOAD_INIT_SUCCESS', initHandler);
         wsClient.off('UPLOAD_CHUNK_SUCCESS', chunkHandler);
         wsClient.off('UPLOAD_COMPLETE', completeHandler);
@@ -89,7 +109,7 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
 
         if (onProgress) {
           onProgress({
-            filename: file.name,
+            filename: fileName,
             progress: 100,
             loaded: totalPieces,
             total: totalPieces,
@@ -107,8 +127,13 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
 
       wsClient.on('UPLOAD_COMPLETE', completeHandler);
 
-      // Handle errors
+      // Handle errors - scoped to this specific file
       const errorHandler = (payload) => {
+        // Check if error is related to our file (if fileId is set)
+        if (fileId && payload.fileId && payload.fileId !== fileId) {
+          return; // Not our file's error
+        }
+        
         if (payload.errorType === 'UPLOAD_INIT_ERROR' || 
             payload.errorType === 'UPLOAD_CHUNK_ERROR' ||
             payload.errorType === 'STORAGE_LIMIT_EXCEEDED' ||

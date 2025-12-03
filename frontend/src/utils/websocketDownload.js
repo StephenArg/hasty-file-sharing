@@ -25,8 +25,13 @@ export class WebSocketDownloadManager {
       // Initialize download
       wsClient.send('DOWNLOAD_INIT', { fileId });
 
-      // Set up message handlers
+      // Set up message handlers - scope to this specific fileId
       const initHandler = async (payload) => {
+        // Only handle init for this specific file
+        if (payload.fileId !== fileId) {
+          return; // Not our file
+        }
+        
         const { fileId: id, filename: fn, totalPieces, chunks, size } = payload;
 
         // Create .part file
@@ -99,6 +104,12 @@ export class WebSocketDownloadManager {
 
       const chunkHandler = async (payload) => {
         const { fileId: id, chunkIndex, data, hash, size, offset } = payload;
+        
+        // Only handle chunks for this specific file
+        if (id !== fileId) {
+          return; // Not our file
+        }
+        
         const download = this.activeDownloads.get(id);
         
         if (!download) {

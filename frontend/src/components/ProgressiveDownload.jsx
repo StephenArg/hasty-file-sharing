@@ -10,6 +10,7 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadS
   }, [fileId]);
 
   const startDownload = async () => {
+    console.log('Starting download for file:', fileId, filename);
     setIsDownloading(true);
     setDownloadStatus({
       fileId,
@@ -25,6 +26,7 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadS
         fileId,
         filename,
         (status) => {
+          console.log('Download progress:', status);
           setDownloadStatus({
             fileId,
             filename,
@@ -37,6 +39,7 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadS
         },
         () => {
           // Download complete
+          console.log('Download complete for file:', fileId);
           setDownloadStatus({
             fileId,
             filename,

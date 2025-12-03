@@ -114,9 +114,37 @@ const FileList = ({ files, onDelete }) => {
     );
   }
 
+  const handleDeleteAll = async () => {
+    if (files.length === 0) return;
+    
+    const confirmed = window.confirm(
+      `Are you sure you want to delete all ${files.length} file(s)? This action cannot be undone.`
+    );
+    
+    if (!confirmed) return;
+    
+    // Delete all files
+    for (const file of files) {
+      if (file.id && !file.id.startsWith('temp-')) {
+        await onDelete(file.id);
+      }
+    }
+  };
+
   return (
     <div className="files-list">
-      <h2>Uploaded Files ({files.length})</h2>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+        <h2 style={{ margin: 0 }}>Uploaded Files ({files.length})</h2>
+        {files.length > 0 && (
+          <button
+            className="btn btn-small btn-danger"
+            onClick={handleDeleteAll}
+            title="Delete all uploaded files"
+          >
+            🗑️ Delete All
+          </button>
+        )}
+      </div>
       {files.map((file) => {
         const info = fileInfo[file.id];
         // File is complete if all pieces are processed (not just uploaded)
