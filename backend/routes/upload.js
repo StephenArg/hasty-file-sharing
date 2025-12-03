@@ -58,11 +58,33 @@ class StreamingProcessingStorage {
   }
 
   _handleFile(req, file, cb) {
-    // Get fileId from request (may be set by chunk/init)
-    const fileId = req.body.fileId || uuidv4();
+    // Get fileId from request if it was pre-initialized via chunk/init
+    // For multiple files, each file should have its own fileId in the form data
+    // Multer puts form fields in req.body, but for multiple files we need to match by filename
+    let fileId = null;
+    
+    // Try to get fileId from form data (frontend sends it via FormData)
+    // For multiple files, we might need to match by filename
+    if (req.body && typeof req.body === 'object') {
+      // Check if there's a fileId field
+      fileId = req.body.fileId;
+      // If it's an array (multiple files), try to match by index or use first
+      if (Array.isArray(fileId)) {
+        fileId = fileId[0]; // Use first fileId for now
+      }
+    }
+    
+    // If no fileId provided, generate a new one
+    if (!fileId) {
+      fileId = uuidv4();
+    }
+    
     const fileExtension = path.extname(file.originalname);
     const finalFilename = `${fileId}${fileExtension}`;
     const finalPath = path.join(UPLOADS_DIR, finalFilename);
+    
+    // Store fileId in file object for later retrieval
+    file.fileId = fileId;
     
     // Create write stream
     const writeStream = require('fs').createWriteStream(finalPath);
@@ -73,88 +95,157 @@ class StreamingProcessingStorage {
     let totalPieces = 0;
     let currentPiece = Buffer.alloc(0);
     let currentPieceIndex = 0;
-    let currentOffset = 0;
     let fileCreated = false;
     let piecesCreated = false;
     
-    // Process file metadata and create database entry as soon as we know the file is starting
-    file.stream.on('data', async (chunk) => {
+    // Check if file already exists in database (from chunk/init) - do this synchronously if possible
+    // But we need to handle async, so use a promise that resolves before processing starts
+    const fileSetupPromise = (async () => {
+      try {
+        const existingFile = await db.getFileById(fileId);
+        
+        if (existingFile) {
+          // File was pre-initialized, use existing piece size
+          pieceSize = existingFile.piece_size;
+          totalPieces = existingFile.total_pieces;
+          piecesCreated = true;
+          fileCreated = true;
+          console.log(`[${fileId}] Using existing file entry with ${totalPieces} pieces`);
+          return { pieceSize, totalPieces };
+        } else {
+          // New file - use a reasonable initial estimate
+          // For multipart uploads, we don't know the total size upfront
+          const INITIAL_ESTIMATE = 100 * 1024 * 1024; // 100MB initial estimate
+          
+          // Start with initial estimate
+          const newPieceSize = getPieceSize(INITIAL_ESTIMATE);
+          const newTotalPieces = Math.ceil(INITIAL_ESTIMATE / newPieceSize);
+          
+          await db.createFile({
+            id: fileId,
+            filename: finalFilename,
+            originalFilename: file.originalname,
+            size: INITIAL_ESTIMATE, // Will be updated later
+            pieceSize: newPieceSize,
+            totalPieces: newTotalPieces,
+            mimeType: mimeTypes.lookup(file.originalname) || 'application/octet-stream',
+            filePath: finalPath
+          });
+          
+          // Create piece entries with initial estimate
+          const dbPieces = [];
+          for (let i = 0; i < newTotalPieces; i++) {
+            const offset = i * newPieceSize;
+            const remainingBytes = INITIAL_ESTIMATE - offset;
+            const currentPieceSize = Math.min(newPieceSize, remainingBytes);
+            
+            dbPieces.push({
+              fileId,
+              pieceIndex: i,
+              hash: '',
+              size: currentPieceSize,
+              offset,
+              isComplete: 0
+            });
+          }
+          await db.createPieces(dbPieces);
+          pieceSize = newPieceSize;
+          totalPieces = newTotalPieces;
+          piecesCreated = true;
+          fileCreated = true;
+          console.log(`[${fileId}] Created file entry and ${totalPieces} pieces (initial estimate)`);
+          return { pieceSize: newPieceSize, totalPieces: newTotalPieces };
+        }
+      } catch (err) {
+        console.error(`[${fileId}] Error creating/checking file entry:`, err);
+        cb(err);
+        throw err;
+      }
+    })();
+    
+    // Set up data handler immediately - it will check piecesCreated before processing
+    file.stream.on('data', (chunk) => {
       totalBytes += chunk.length;
       
-      // Determine piece size on first chunk
-      if (!pieceSize) {
-        // Estimate file size from Content-Length header if available
-        const estimatedSize = parseInt(req.headers['content-length']) || totalBytes;
-        pieceSize = getPieceSize(estimatedSize);
-        totalPieces = Math.ceil(estimatedSize / pieceSize);
-        
-        // Create file entry immediately
-        if (!fileCreated) {
-          fileCreated = true;
-          try {
-            await db.createFile({
-              id: fileId,
-              filename: finalFilename,
-              originalFilename: file.originalname,
-              size: estimatedSize,
-              pieceSize,
-              totalPieces,
-              mimeType: mimeTypes.lookup(file.originalname) || 'application/octet-stream',
-              filePath: finalPath
+      // Wait for file setup if not ready yet, then process
+      fileSetupPromise.then(() => {
+        // Update piece size if needed based on actual size (only if we started with estimate)
+        if (fileCreated && totalBytes > 100 * 1024 * 1024) {
+          const newPieceSize = getPieceSize(totalBytes);
+          const newTotalPieces = Math.ceil(totalBytes / newPieceSize);
+          
+          // Only update if piece size changed significantly
+          if (newPieceSize !== pieceSize) {
+            pieceSize = newPieceSize;
+            totalPieces = newTotalPieces;
+            
+            // Update file entry
+            db.updateFile(fileId, {
+              pieceSize: newPieceSize,
+              totalPieces: newTotalPieces,
+              size: totalBytes
+            }).catch(err => {
+              console.error(`[${fileId}] Error updating file size:`, err);
             });
             
-            // Create piece entries
-            const dbPieces = [];
-            for (let i = 0; i < totalPieces; i++) {
-              const offset = i * pieceSize;
-              const remainingBytes = estimatedSize - offset;
-              const currentPieceSize = Math.min(pieceSize, remainingBytes);
-              
-              dbPieces.push({
-                fileId,
-                pieceIndex: i,
-                hash: '',
-                size: currentPieceSize,
-                offset,
-                isComplete: 0
-              });
-            }
-            await db.createPieces(dbPieces);
-            piecesCreated = true;
-            console.log(`[${fileId}] Created file entry and ${totalPieces} pieces`);
-          } catch (err) {
-            console.error(`[${fileId}] Error creating file entry:`, err);
+            // Add more pieces if needed
+            db.getPiecesByFileId(fileId).then(existingPieces => {
+              if (existingPieces.length < newTotalPieces) {
+                const newPieces = [];
+                for (let i = existingPieces.length; i < newTotalPieces; i++) {
+                  const offset = i * pieceSize;
+                  const remainingBytes = totalBytes - offset;
+                  const currentPieceSize = Math.min(pieceSize, remainingBytes);
+                  
+                  newPieces.push({
+                    fileId,
+                    pieceIndex: i,
+                    hash: '',
+                    size: currentPieceSize,
+                    offset,
+                    isComplete: 0
+                  });
+                }
+                if (newPieces.length > 0) {
+                  db.createPieces(newPieces).catch(err => {
+                    console.error(`[${fileId}] Error creating additional pieces:`, err);
+                  });
+                }
+              }
+            });
           }
         }
-      }
-      
-      // Accumulate chunks into pieces
-      currentPiece = Buffer.concat([currentPiece, chunk]);
-      
-      // Process complete pieces as they're formed
-      while (currentPiece.length >= pieceSize && piecesCreated) {
-        const pieceData = currentPiece.slice(0, pieceSize);
-        const hash = hashPiece(pieceData);
         
-        // Mark piece as complete immediately
-        const pieceIndex = currentPieceIndex;
-        Promise.all([
-          db.updatePieceHash(fileId, pieceIndex, hash),
-          db.updatePieceComplete(fileId, pieceIndex, true)
-        ]).then(() => {
-          if (pieceIndex % 100 === 0) {
-            console.log(`[${fileId}] Processed piece ${pieceIndex + 1}/${totalPieces} during upload`);
-          }
-        }).catch(err => {
-          console.error(`[${fileId}] Error processing piece ${pieceIndex}:`, err);
-        });
+        // Accumulate chunks into pieces
+        currentPiece = Buffer.concat([currentPiece, chunk]);
         
-        currentPiece = currentPiece.slice(pieceSize);
-        currentPieceIndex++;
-        currentOffset += pieceSize;
-      }
+        // Process complete pieces as they're formed - this happens DURING upload
+        while (currentPiece.length >= pieceSize && piecesCreated) {
+          const pieceData = currentPiece.slice(0, pieceSize);
+          const hash = hashPiece(pieceData);
+          
+          // Mark piece as complete immediately (don't await - let it run in background)
+          const pieceIndex = currentPieceIndex;
+          Promise.all([
+            db.updatePieceHash(fileId, pieceIndex, hash),
+            db.updatePieceComplete(fileId, pieceIndex, true)
+          ]).then(() => {
+            if (pieceIndex % 100 === 0 || pieceIndex < 10) {
+              console.log(`[${fileId}] Processed piece ${pieceIndex + 1} during upload (${totalBytes} bytes received)`);
+            }
+          }).catch(err => {
+            console.error(`[${fileId}] Error processing piece ${pieceIndex}:`, err);
+          });
+          
+          currentPiece = currentPiece.slice(pieceSize);
+          currentPieceIndex++;
+        }
+      }).catch(err => {
+        // File setup failed, but continue writing to disk
+        console.error(`[${fileId}] File setup error, continuing upload:`, err);
+      });
       
-      // Write to disk
+      // Always write to disk, even if setup isn't complete
       writeStream.write(chunk);
     });
     
@@ -254,8 +345,8 @@ router.post('/files', upload.array('files'), async (req, res) => {
     
     for (const file of req.files) {
       // File has already been processed during upload by StreamingProcessingStorage
-      // The fileId is in the filename (extracted from path)
-      const fileId = path.basename(file.filename, path.extname(file.filename));
+      // The fileId is stored in the file object by the storage engine
+      const fileId = file.fileId || path.basename(file.filename, path.extname(file.filename));
       const fileStats = await fs.stat(file.path);
       
       // Get file info from database (already created by storage)
@@ -263,6 +354,11 @@ router.post('/files', upload.array('files'), async (req, res) => {
       if (!dbFile) {
         console.error(`[${fileId}] File not found in database after upload`);
         continue;
+      }
+      
+      // Update final file size
+      if (fileStats.size !== dbFile.size) {
+        await db.updateFile(fileId, { size: fileStats.size });
       }
       
       // Return file info
