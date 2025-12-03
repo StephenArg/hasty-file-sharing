@@ -14,6 +14,7 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
       let uploadedChunks = 0;
       let fileId = null;
       let totalPieces = 0;
+      let pieceSize = 0; // Store pieceSize for use in chunkHandler
 
       // Initialize upload
       wsClient.send('UPLOAD_INIT', {
@@ -26,6 +27,7 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
       const initHandler = (payload) => {
         fileId = payload.fileId;
         totalPieces = payload.totalPieces;
+        pieceSize = payload.pieceSize; // Store pieceSize in outer scope
         
         if (onFileStart) {
           onFileStart({
@@ -37,9 +39,6 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
             uploadComplete: false
           });
         }
-
-        // Store pieceSize for progress calculation
-        const pieceSize = payload.pieceSize;
         
         // Start uploading chunks
         uploadChunks(file, fileId, pieceSize, payload.totalPieces, fileSize, onProgress, resolve, reject);
@@ -55,7 +54,7 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
         // Calculate bytes transferred (approximate based on chunks uploaded)
         // For the last chunk, use exact remaining bytes
         let bytesTransferred = 0;
-        if (uploadedChunks > 0) {
+        if (uploadedChunks > 0 && pieceSize > 0) {
           if (uploadedChunks === totalPieces) {
             bytesTransferred = fileSize; // All chunks uploaded
           } else {
