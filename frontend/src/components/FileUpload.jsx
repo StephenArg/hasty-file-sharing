@@ -22,14 +22,29 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress }) =
       formData.append('files', file);
 
       const startTime = Date.now();
+      let lastUpdateTime = startTime;
+      let lastLoaded = 0;
 
-      // Track progress
+      // Track progress - use requestAnimationFrame for smoother updates
       xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          const progress = Math.round((e.loaded / e.total) * 100);
-          const elapsed = (Date.now() - startTime) / 1000;
-          const speed = elapsed > 0 ? formatBytes(e.loaded / elapsed) + '/s' : '';
+        if (e.lengthComputable && e.total > 0) {
+          const now = Date.now();
+          const progress = Math.min(100, Math.round((e.loaded / e.total) * 100));
+          const elapsed = (now - startTime) / 1000;
           
+          // Calculate speed based on recent progress
+          const timeDelta = (now - lastUpdateTime) / 1000;
+          const loadedDelta = e.loaded - lastLoaded;
+          const speed = timeDelta > 0 && loadedDelta > 0 
+            ? formatBytes(loadedDelta / timeDelta) + '/s' 
+            : elapsed > 0 
+              ? formatBytes(e.loaded / elapsed) + '/s' 
+              : '';
+          
+          lastUpdateTime = now;
+          lastLoaded = e.loaded;
+          
+          // Force state update - always update to ensure React re-renders
           setUploadProgress(prev => {
             const updated = [...prev];
             updated[index] = {
@@ -37,7 +52,8 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress }) =
               progress,
               loaded: e.loaded,
               total: e.total,
-              speed
+              speed,
+              timestamp: Date.now() // Add timestamp to force re-render
             };
             if (onUploadProgress) {
               onUploadProgress(updated);
@@ -105,22 +121,24 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress }) =
     })));
 
     try {
-      // Upload files one by one to track individual progress
+      // Upload files in parallel to see progress for all files simultaneously
+      const uploadPromises = filesArray.map((file, i) => 
+        uploadFileWithProgress(file, i, filesArray.length)
+          .then(result => ({ success: true, result, index: i }))
+          .catch(err => ({ success: false, error: err, index: i, filename: file.name }))
+      );
+
+      const uploadResults = await Promise.all(uploadPromises);
       const results = [];
-      for (let i = 0; i < filesArray.length; i++) {
-        const file = filesArray[i];
-        try {
-          const result = await uploadFileWithProgress(file, i, filesArray.length);
-          
-          if (result.success && result.files && result.files.length > 0) {
-            results.push(...result.files);
-          }
-        } catch (err) {
-          // Continue with other files even if one fails
-          console.error(`Failed to upload ${file.name}:`, err);
-          if (i === 0 && filesArray.length === 1) {
+
+      for (const uploadResult of uploadResults) {
+        if (uploadResult.success && uploadResult.result.success && uploadResult.result.files) {
+          results.push(...uploadResult.result.files);
+        } else if (!uploadResult.success) {
+          console.error(`Failed to upload ${uploadResult.filename}:`, uploadResult.error);
+          if (uploadResults.length === 1) {
             // If it's the only file, throw the error
-            throw err;
+            throw uploadResult.error;
           }
         }
       }
@@ -270,7 +288,7 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress }) =
         <div className="upload-progress-wrapper">
           <h3>Uploading Files</h3>
           {uploadProgress.map((upload, index) => (
-            <div key={index} className="upload-progress-item">
+            <div key={`${upload.filename}-${index}`} className="upload-progress-item">
               <div className="upload-progress-header">
                 <span className="upload-filename">{upload.filename}</span>
                 <span className="upload-percentage">{upload.progress}%</span>
@@ -278,7 +296,7 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress }) =
               <div className="upload-progress-bar-container">
                 <div 
                   className="upload-progress-bar"
-                  style={{ width: `${upload.progress}%` }}
+                  style={{ width: `${Math.max(0, Math.min(100, upload.progress))}%` }}
                 ></div>
               </div>
               <div className="upload-progress-details">
