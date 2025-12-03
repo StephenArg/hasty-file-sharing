@@ -1,5 +1,6 @@
 const express = require('express');
 const db = require('../database');
+const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -17,9 +18,9 @@ router.get('/', async (req, res) => {
 });
 
 /**
- * Delete a file
+ * Delete a file (protected - requires auth)
  */
-router.delete('/:fileId', async (req, res) => {
+router.delete('/:fileId', requireAuth, async (req, res) => {
   try {
     const { fileId } = req.params;
     

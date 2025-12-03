@@ -96,6 +96,19 @@ const Login = ({ onLogin }) => {
         </form>
         
         <p className="login-note">You'll stay logged in for 30 days</p>
+        
+        <div style={{ marginTop: '20px', paddingTop: '20px', borderTop: '1px solid #e0e0e0' }}>
+          <a 
+            href="/uploaded" 
+            style={{ 
+              color: '#667eea', 
+              textDecoration: 'none',
+              fontSize: '0.9em'
+            }}
+          >
+            📥 View uploaded files (no password required)
+          </a>
+        </div>
       </div>
     </div>
   );

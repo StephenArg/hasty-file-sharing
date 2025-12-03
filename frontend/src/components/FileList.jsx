@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import ProgressiveDownload from './ProgressiveDownload';
 
-const FileList = ({ files, onDelete }) => {
+const FileList = ({ files, onDelete, showDelete = true }) => {
   const [copiedId, setCopiedId] = useState(null);
   const [fileInfo, setFileInfo] = useState({});
   const [downloadStatus, setDownloadStatus] = useState({}); // Map of fileId -> status
@@ -32,9 +32,7 @@ const FileList = ({ files, onDelete }) => {
 
   const fetchFileInfo = async (fileId) => {
     try {
-      const response = await fetch(`/api/download/${fileId}/info`, {
-        credentials: 'include'
-      });
+      const response = await fetch(`/api/download/${fileId}/info`);
       
       if (response.status === 401) {
         // Not authenticated, skip
@@ -143,7 +141,7 @@ const FileList = ({ files, onDelete }) => {
     <div className="files-list">
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
         <h2 style={{ margin: 0 }}>Uploaded Files ({files.length})</h2>
-        {files.length > 0 && (
+        {showDelete && files.length > 0 && (
           <button
             className="btn btn-small btn-danger"
             onClick={handleDeleteAll}
@@ -239,7 +237,7 @@ const FileList = ({ files, onDelete }) => {
                       ⬇️ Direct Download
                     </button>
                   )}
-                  {file.id && !file.id.startsWith('temp-') && !isDownloading[file.id] && (
+                  {showDelete && file.id && !file.id.startsWith('temp-') && !isDownloading[file.id] && (
                     <button
                       className="btn btn-small btn-danger"
                       onClick={() => {

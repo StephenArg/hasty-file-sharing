@@ -1,11 +1,13 @@
 import React, { useState, useCallback, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, useLocation } from 'react-router-dom';
 import FileUpload from './components/FileUpload';
 import FileList from './components/FileList';
 import StorageStats from './components/StorageStats';
 import Login from './components/Login';
+import PublicFileList from './components/PublicFileList';
 import './App.css';
 
-function App() {
+function AppContent() {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -67,10 +69,18 @@ function App() {
     }
   }, []);
 
-  // Check authentication status on mount
+  const location = useLocation();
+  const isPublicPage = location.pathname === '/uploaded';
+
+  // Check authentication status on mount (only for main app, not public page)
   useEffect(() => {
-    checkAuthStatus();
-  }, []);
+    if (!isPublicPage) {
+      checkAuthStatus();
+    } else {
+      setCheckingAuth(false);
+      setAuthenticated(false); // Don't require auth for public page
+    }
+  }, [isPublicPage]);
 
   const checkAuthStatus = async () => {
     try {
@@ -194,9 +204,14 @@ function App() {
     }
   };
 
-  // Show login page if checking auth or not authenticated
-  if (checkingAuth || !authenticated) {
+  // Show login page if checking auth or not authenticated (but not on public page)
+  if (!isPublicPage && (checkingAuth || !authenticated)) {
     return <Login onLogin={handleLogin} />;
+  }
+
+  // Show public file list on /uploaded route
+  if (isPublicPage) {
+    return <PublicFileList />;
   }
 
   return (
@@ -247,6 +262,14 @@ function App() {
 
       <FileList files={files} onDelete={handleDelete} />
     </div>
+  );
+}
+
+function App() {
+  return (
+    <Router>
+      <AppContent />
+    </Router>
   );
 }
 

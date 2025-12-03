@@ -66,10 +66,12 @@ app.use('/api/auth', authRoutes);
 // Note: Static files are served without auth check - the frontend will handle showing login
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Protected API routes
+// Protected API routes (uploads require auth)
 app.use('/api/upload', requireAuth, uploadRoutes);
-app.use('/api/download', requireAuth, downloadRoutes);
-app.use('/api/files', requireAuth, fileRoutes);
+
+// Public API routes (downloads and file list are public)
+app.use('/api/download', downloadRoutes);
+app.use('/api/files', fileRoutes);
 
 // Health check (public)
 app.get('/api/health', (req, res) => {

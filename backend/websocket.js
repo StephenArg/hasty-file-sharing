@@ -45,12 +45,6 @@ function initializeWebSocket(server) {
 
     ws.on('message', async (data) => {
       try {
-        // Check authentication for protected operations
-        if (isAuthRequired() && !ws.authenticated) {
-          sendError(ws, 'AUTH_REQUIRED', 'Authentication required');
-          return;
-        }
-        
         const message = JSON.parse(data.toString());
         await handleMessage(ws, message);
       } catch (err) {
@@ -82,18 +76,31 @@ async function handleMessage(ws, message) {
 
   switch (type) {
     case 'UPLOAD_INIT':
+      // Require auth for uploads
+      if (isAuthRequired() && !ws.authenticated) {
+        sendError(ws, 'AUTH_REQUIRED', 'Authentication required for uploads');
+        return;
+      }
       await handleUploadInit(ws, payload);
       break;
     case 'UPLOAD_CHUNK':
+      // Require auth for uploads
+      if (isAuthRequired() && !ws.authenticated) {
+        sendError(ws, 'AUTH_REQUIRED', 'Authentication required for uploads');
+        return;
+      }
       await handleUploadChunk(ws, payload);
       break;
     case 'DOWNLOAD_INIT':
+      // Downloads are public - no auth check
       await handleDownloadInit(ws, payload);
       break;
     case 'DOWNLOAD_REQUEST':
+      // Downloads are public - no auth check
       await handleDownloadRequest(ws, payload);
       break;
     case 'DOWNLOAD_CANCEL':
+      // Downloads are public - no auth check
       await handleDownloadCancel(ws, payload);
       break;
     default:
