@@ -177,11 +177,18 @@ router.post('/files', upload.array('files'), async (req, res) => {
           
           // Delete old pieces if they exist
           if (existingPieces.length > 0) {
+            const sqlite3 = require('sqlite3').verbose();
+            const path = require('path');
+            const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../data');
+            const DB_PATH = path.join(DATA_DIR, 'files.db');
+            const database = new sqlite3.Database(DB_PATH);
+            
             await new Promise((resolve, reject) => {
               database.run(
                 `DELETE FROM pieces WHERE file_id = ?`,
                 [fileId],
                 (err) => {
+                  database.close();
                   if (err) reject(err);
                   else resolve();
                 }
@@ -225,80 +232,97 @@ router.post('/files', upload.array('files'), async (req, res) => {
         totalPieces
       });
       
-      // Process file into pieces in the background (async, don't await)
-      // Use the actual piece size from the file entry to ensure consistency
-      // Add a small delay to ensure database pieces are created first
-      setTimeout(async () => {
+      // Process file into pieces incrementally as they become available
+      // This allows pieces to be available for download progressively
+      // Process pieces in parallel batches for faster availability
+      (async () => {
         try {
-          console.log(`[${fileId}] Starting background processing for file at ${finalPath}`);
+          console.log(`[${fileId}] Starting incremental processing for file at ${finalPath}`);
           
-          const { pieces } = await processFile(finalPath, pieceSize);
-          console.log(`[${fileId}] Processed file into ${pieces.length} pieces`);
+          // Wait a moment for file to be fully written
+          await new Promise(resolve => setTimeout(resolve, 100));
           
-          // First, verify pieces exist in database
-          const dbPieces = await db.getPiecesByFileId(fileId);
-          console.log(`[${fileId}] Found ${dbPieces.length} pieces in database`);
-          
+          // Verify pieces exist in database
+          let dbPieces = await db.getPiecesByFileId(fileId);
           if (dbPieces.length === 0) {
-            console.error(`[${fileId}] No pieces found in database! Creating them now...`);
-            // Create pieces if they don't exist
-            const dbPiecesToCreate = pieces.map(piece => ({
-              fileId,
-              pieceIndex: piece.pieceIndex,
-              hash: piece.hash,
-              size: piece.size,
-              offset: piece.offset,
-              isComplete: 1 // Mark as complete since we're processing them
-            }));
-            await db.createPieces(dbPiecesToCreate);
-            console.log(`[${fileId}] Created ${dbPiecesToCreate.length} pieces and marked as complete`);
-            
-            // Verify they were created
-            const verifyPieces = await db.getPiecesByFileId(fileId);
-            const completeCount = verifyPieces.filter(p => p.is_complete === 1).length;
-            console.log(`[${fileId}] Verification: ${completeCount}/${verifyPieces.length} pieces marked complete`);
+            console.error(`[${fileId}] No pieces found in database!`);
             return;
           }
           
-          if (dbPieces.length !== pieces.length) {
-            console.warn(`[${fileId}] Piece count mismatch: DB has ${dbPieces.length}, file has ${pieces.length}`);
-          }
+          // Process pieces incrementally using streaming
+          const { processFileStream } = require('../utils/chunking');
           
-          // Update pieces with hashes and mark as complete
-          let successCount = 0;
-          let errorCount = 0;
-          let noChangeCount = 0;
+          // Track processed pieces for logging
+          let processedCount = 0;
+          const BATCH_SIZE = 10; // Process 10 pieces in parallel at a time
+          let currentBatch = [];
           
-          for (const piece of pieces) {
-            try {
-              const [hashResult, completeResult] = await Promise.all([
-                db.updatePieceHash(fileId, piece.pieceIndex, piece.hash),
-                db.updatePieceComplete(fileId, piece.pieceIndex, true)
-              ]);
+          // Use streaming processing - pieces are processed and marked complete as they're read
+          await processFileStream(finalPath, pieceSize, async (piece) => {
+            // Add to current batch
+            currentBatch.push(piece);
+            
+            // When batch is full, process all pieces in parallel
+            if (currentBatch.length >= BATCH_SIZE) {
+              const batch = [...currentBatch];
+              currentBatch = [];
               
-              if (hashResult === 0 || completeResult === 0) {
-                noChangeCount++;
-                console.warn(`[${fileId}] Piece ${piece.pieceIndex} update returned 0 changes (hash: ${hashResult}, complete: ${completeResult})`);
-              } else {
-                successCount++;
-              }
-            } catch (err) {
-              console.error(`[${fileId}] Error updating piece ${piece.pieceIndex}:`, err);
-              errorCount++;
+              // Process batch in parallel (don't await - let it run in background)
+              Promise.all(batch.map(async (p) => {
+                try {
+                  const [hashResult, completeResult] = await Promise.all([
+                    db.updatePieceHash(fileId, p.pieceIndex, p.hash),
+                    db.updatePieceComplete(fileId, p.pieceIndex, true)
+                  ]);
+                  
+                  if (hashResult === 0 || completeResult === 0) {
+                    console.warn(`[${fileId}] Piece ${p.pieceIndex} update returned 0 changes`);
+                  } else {
+                    processedCount++;
+                    // Log progress every 100 pieces
+                    if (processedCount % 100 === 0) {
+                      console.log(`[${fileId}] Processed ${processedCount}/${totalPieces} pieces`);
+                    }
+                  }
+                } catch (err) {
+                  console.error(`[${fileId}] Error processing piece ${p.pieceIndex}:`, err);
+                }
+              })).catch(err => {
+                console.error(`[${fileId}] Error in batch processing:`, err);
+              });
             }
+          });
+          
+          // Process any remaining pieces in the batch
+          if (currentBatch.length > 0) {
+            await Promise.all(currentBatch.map(async (p) => {
+              try {
+                const [hashResult, completeResult] = await Promise.all([
+                  db.updatePieceHash(fileId, p.pieceIndex, p.hash),
+                  db.updatePieceComplete(fileId, p.pieceIndex, true)
+                ]);
+                
+                if (hashResult > 0 && completeResult > 0) {
+                  processedCount++;
+                }
+              } catch (err) {
+                console.error(`[${fileId}] Error processing piece ${p.pieceIndex}:`, err);
+              }
+            }));
           }
           
-          console.log(`[${fileId}] Processed ${successCount}/${pieces.length} pieces successfully${errorCount > 0 ? `, ${errorCount} errors` : ''}${noChangeCount > 0 ? `, ${noChangeCount} no changes` : ''}`);
+          // Wait a moment for all async processing to complete
+          await new Promise(resolve => setTimeout(resolve, 500));
           
           // Final verification
           const finalPieces = await db.getPiecesByFileId(fileId);
           const finalCompleteCount = finalPieces.filter(p => p.is_complete === 1).length;
-          console.log(`[${fileId}] Final verification: ${finalCompleteCount}/${finalPieces.length} pieces marked complete`);
+          console.log(`[${fileId}] Processing complete: ${finalCompleteCount}/${finalPieces.length} pieces marked complete`);
         } catch (err) {
           console.error(`[${fileId}] Error processing file:`, err);
           console.error(err.stack);
         }
-      }, 1000); // Increased delay to ensure database operations complete
+      })();
     }
     
     res.json({ 

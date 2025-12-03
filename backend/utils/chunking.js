@@ -96,6 +96,8 @@ async function processFileStream(filePath, pieceSize = null, onPiece = null) {
   let currentOffset = 0;
   
   return new Promise((resolve, reject) => {
+    const piecePromises = [];
+    
     stream.on('data', (chunk) => {
       currentPiece = Buffer.concat([currentPiece, chunk]);
       
@@ -113,7 +115,13 @@ async function processFileStream(filePath, pieceSize = null, onPiece = null) {
         pieces.push(piece);
         
         if (onPiece) {
-          onPiece(piece);
+          // Call onPiece callback - if it returns a promise, track it
+          const result = onPiece(piece);
+          if (result && typeof result.then === 'function') {
+            piecePromises.push(result.catch(err => {
+              console.error(`Error in onPiece callback for piece ${piece.pieceIndex}:`, err);
+            }));
+          }
         }
         
         currentPiece = currentPiece.slice(pieceSize);
@@ -122,16 +130,34 @@ async function processFileStream(filePath, pieceSize = null, onPiece = null) {
       }
     });
     
-    stream.on('end', () => {
+    stream.on('end', async () => {
       // Handle remaining data
       if (currentPiece.length > 0) {
         const hash = hashPiece(currentPiece);
-        pieces.push({
+        const lastPiece = {
           pieceIndex: currentPieceIndex,
           hash,
           size: currentPiece.length,
           offset: currentOffset
-        });
+        };
+        pieces.push(lastPiece);
+        
+        if (onPiece) {
+          const result = onPiece(lastPiece);
+          if (result && typeof result.then === 'function') {
+            piecePromises.push(result.catch(err => {
+              console.error(`Error in onPiece callback for last piece:`, err);
+            }));
+          }
+        }
+      }
+      
+      // Wait for all piece processing to complete (but don't block on errors)
+      try {
+        await Promise.all(piecePromises);
+      } catch (err) {
+        // Individual errors are already caught, just log if there's a general issue
+        console.error('Some piece processing callbacks failed:', err);
       }
       
       resolve({
