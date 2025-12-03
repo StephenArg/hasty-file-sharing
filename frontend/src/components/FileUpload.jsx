@@ -81,7 +81,10 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
             });
             // Notify that file is available (even if still processing)
             if (data.success && data.files && data.files.length > 0 && onFileStart) {
-              onFileStart(data.files[0]);
+              // Call onFileStart for each file in the response
+              data.files.forEach(file => {
+                onFileStart(file);
+              });
             }
             resolve(data);
           } catch (err) {
@@ -129,6 +132,8 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
 
     try {
       // Upload files in parallel to see progress for all files simultaneously
+      // Note: onFileStart is called immediately when each file upload completes
+      // (inside uploadFileWithProgress), so files appear in list as they finish
       const uploadPromises = filesArray.map((file, i) => 
         uploadFileWithProgress(file, i, filesArray.length)
           .then(result => ({ success: true, result, index: i }))
@@ -150,6 +155,7 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
         }
       }
 
+      // Call onSuccess with all results (files should already be in list via onFileStart)
       if (results.length > 0) {
         onSuccess(results);
       }

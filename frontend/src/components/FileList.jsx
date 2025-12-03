@@ -50,6 +50,20 @@ const FileList = ({ files, onDelete }) => {
     });
   }, [files]);
 
+  // Listen for new files being added
+  useEffect(() => {
+    const handleFileAdded = (event) => {
+      const { fileId } = event.detail;
+      // Immediately fetch info for the new file
+      fetchFileInfo(fileId);
+    };
+
+    window.addEventListener('fileAdded', handleFileAdded);
+    return () => {
+      window.removeEventListener('fileAdded', handleFileAdded);
+    };
+  }, []);
+
   useEffect(() => {
     // Set up polling for incomplete files
     const interval = setInterval(() => {

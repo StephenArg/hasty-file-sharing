@@ -126,22 +126,29 @@ function App() {
         onLoadingChange={setLoading}
         storageStats={storageStats}
         onFileStart={(file) => {
-          // Add file to list immediately when upload starts
+          // Add file to list immediately when upload completes (before processing)
+          console.log('File upload completed, adding to list:', file);
           setFiles(prev => {
             const existingIds = new Set(prev.map(f => f.id));
             if (!existingIds.has(file.id)) {
-              return [{
+              const newFile = {
                 id: file.id,
-                filename: file.filename,
-                original_filename: file.filename,
+                filename: file.filename || file.original_filename,
+                original_filename: file.filename || file.original_filename,
                 size: file.size,
-                total_pieces: file.totalPieces,
-                piece_size: file.pieceSize,
+                total_pieces: file.totalPieces || file.total_pieces,
+                piece_size: file.pieceSize || file.piece_size,
                 created_at: new Date().toISOString()
-              }, ...prev];
+              };
+              console.log('Adding new file:', newFile);
+              return [newFile, ...prev];
             }
             return prev;
           });
+          // Refresh file info to start polling for piece completion
+          setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('fileAdded', { detail: { fileId: file.id } }));
+          }, 100);
         }}
       />
 
