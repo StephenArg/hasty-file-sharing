@@ -16,6 +16,11 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
       let totalPieces = 0;
       let pieceSize = 0; // Store pieceSize for use in chunkHandler
       const fileName = file.name; // Capture filename to avoid closure issues
+      
+      // Use a unique session identifier to match responses
+      // We'll use filename + size + timestamp as a temporary identifier
+      const sessionId = `${fileName}-${fileSize}-${Date.now()}`;
+      let handlersRegistered = false;
 
       // Initialize upload
       wsClient.send('UPLOAD_INIT', {
@@ -26,7 +31,9 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
 
       // Handle upload init success - scoped to this specific file
       const initHandler = (payload) => {
-        // If we already have a fileId, only handle if it matches
+        // Only process if we don't have a fileId yet (first response)
+        // We can't match by fileId yet, so we'll accept the first response
+        // and then use fileId for all subsequent messages
         if (fileId && payload.fileId !== fileId) {
           return; // Not our file
         }
@@ -34,6 +41,8 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
         // Set fileId from payload (first time)
         if (!fileId) {
           fileId = payload.fileId;
+        } else if (payload.fileId !== fileId) {
+          return; // Not our file
         }
         
         totalPieces = payload.totalPieces;
@@ -50,60 +59,70 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
           });
         }
         
+        // Register chunk handler only after we have fileId
+        if (!handlersRegistered) {
+          handlersRegistered = true;
+          
+          // Handle chunk upload success - scoped to this specific file
+          const chunkHandler = (payload) => {
+            // Only handle chunks for this specific file
+            if (payload.fileId !== fileId) {
+              return; // Not our file
+            }
+            
+            uploadedChunks = payload.uploadedChunks;
+            const progress = totalPieces > 0 ? (uploadedChunks / totalPieces) * 100 : 0;
+            
+            // Calculate bytes transferred (approximate based on chunks uploaded)
+            // For the last chunk, use exact remaining bytes
+            let bytesTransferred = 0;
+            if (uploadedChunks > 0 && pieceSize > 0) {
+              if (uploadedChunks === totalPieces) {
+                bytesTransferred = fileSize; // All chunks uploaded
+              } else {
+                // Calculate: (uploadedChunks - 1) * pieceSize + current chunk size
+                const fullChunksBytes = (uploadedChunks - 1) * pieceSize;
+                const lastChunkSize = Math.min(pieceSize, fileSize - fullChunksBytes);
+                bytesTransferred = fullChunksBytes + lastChunkSize;
+              }
+            }
+            
+            if (onProgress) {
+              onProgress({
+                filename: fileName,
+                progress: Math.round(progress),
+                loaded: uploadedChunks,
+                total: totalPieces,
+                bytesLoaded: bytesTransferred,
+                bytesTotal: fileSize,
+                speed: ''
+              });
+            }
+          };
+
+          wsClient.on('UPLOAD_CHUNK_SUCCESS', chunkHandler);
+          
+          // Store handler for cleanup
+          initHandler._chunkHandler = chunkHandler;
+        }
+        
         // Start uploading chunks
         uploadChunks(file, fileId, pieceSize, payload.totalPieces, fileSize, onProgress, resolve, reject);
       };
 
       wsClient.on('UPLOAD_INIT_SUCCESS', initHandler);
 
-      // Handle chunk upload success - scoped to this specific file
-      const chunkHandler = (payload) => {
-        // Only handle chunks for this specific file
-        if (!fileId || payload.fileId !== fileId) {
-          return; // Not our file
-        }
-        
-        uploadedChunks = payload.uploadedChunks;
-        const progress = totalPieces > 0 ? (uploadedChunks / totalPieces) * 100 : 0;
-        
-        // Calculate bytes transferred (approximate based on chunks uploaded)
-        // For the last chunk, use exact remaining bytes
-        let bytesTransferred = 0;
-        if (uploadedChunks > 0 && pieceSize > 0) {
-          if (uploadedChunks === totalPieces) {
-            bytesTransferred = fileSize; // All chunks uploaded
-          } else {
-            // Calculate: (uploadedChunks - 1) * pieceSize + current chunk size
-            const fullChunksBytes = (uploadedChunks - 1) * pieceSize;
-            const lastChunkSize = Math.min(pieceSize, fileSize - fullChunksBytes);
-            bytesTransferred = fullChunksBytes + lastChunkSize;
-          }
-        }
-        
-        if (onProgress) {
-          onProgress({
-            filename: fileName,
-            progress: Math.round(progress),
-            loaded: uploadedChunks,
-            total: totalPieces,
-            bytesLoaded: bytesTransferred,
-            bytesTotal: fileSize,
-            speed: ''
-          });
-        }
-      };
-
-      wsClient.on('UPLOAD_CHUNK_SUCCESS', chunkHandler);
-
       // Handle upload complete - scoped to this specific file
       const completeHandler = (payload) => {
         // Only handle completion for this specific file
-        if (!fileId || payload.fileId !== fileId) {
+        if (payload.fileId !== fileId) {
           return; // Not our file
         }
         
         wsClient.off('UPLOAD_INIT_SUCCESS', initHandler);
-        wsClient.off('UPLOAD_CHUNK_SUCCESS', chunkHandler);
+        if (initHandler._chunkHandler) {
+          wsClient.off('UPLOAD_CHUNK_SUCCESS', initHandler._chunkHandler);
+        }
         wsClient.off('UPLOAD_COMPLETE', completeHandler);
         wsClient.off('ERROR', errorHandler);
 
@@ -139,7 +158,9 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
             payload.errorType === 'STORAGE_LIMIT_EXCEEDED' ||
             payload.errorType === 'HASH_MISMATCH') {
           wsClient.off('UPLOAD_INIT_SUCCESS', initHandler);
-          wsClient.off('UPLOAD_CHUNK_SUCCESS', chunkHandler);
+          if (initHandler._chunkHandler) {
+            wsClient.off('UPLOAD_CHUNK_SUCCESS', initHandler._chunkHandler);
+          }
           wsClient.off('UPLOAD_COMPLETE', completeHandler);
           wsClient.off('ERROR', errorHandler);
           reject(new Error(payload.message));

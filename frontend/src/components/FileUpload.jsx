@@ -20,24 +20,31 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
   const formatBytes = formatFileSize;
 
   const uploadFileWithProgress = async (file, index, totalFiles, fileId = null) => {
+    // Store the filename to match progress updates
+    const fileName = file.name;
+    
     try {
       // Upload via WebSocket
       const result = await uploadFileViaWebSocket(
         file,
         (progress) => {
-          // Update progress
+          // Update progress - match by filename to ensure correct file
           setUploadProgress(prev => {
             const updated = [...prev];
-            updated[index] = {
-              filename: file.name,
-              progress: progress.progress,
-              loaded: progress.loaded,
-              total: progress.total,
-              bytesLoaded: progress.bytesLoaded || 0,
-              bytesTotal: progress.bytesTotal || file.size,
-              speed: progress.speed || '',
-              timestamp: Date.now()
-            };
+            // Find the correct index by matching filename
+            const fileIndex = updated.findIndex(p => p.filename === fileName);
+            if (fileIndex >= 0) {
+              updated[fileIndex] = {
+                filename: fileName,
+                progress: progress.progress,
+                loaded: progress.loaded,
+                total: progress.total,
+                bytesLoaded: progress.bytesLoaded || 0,
+                bytesTotal: progress.bytesTotal || file.size,
+                speed: progress.speed || '',
+                timestamp: Date.now()
+              };
+            }
             if (onUploadProgress) {
               onUploadProgress(updated);
             }
@@ -55,10 +62,14 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
       // Update progress to 100%
       setUploadProgress(prev => {
         const updated = [...prev];
-        updated[index] = {
-          ...updated[index],
-          progress: 100
-        };
+        // Find the correct index by matching filename
+        const fileIndex = updated.findIndex(p => p.filename === fileName);
+        if (fileIndex >= 0) {
+          updated[fileIndex] = {
+            ...updated[fileIndex],
+            progress: 100
+          };
+        }
         return updated;
       });
 
