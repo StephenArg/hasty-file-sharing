@@ -48,24 +48,177 @@ async function checkStorageSpace(requiredBytes) {
   };
 }
 
-// Configure multer for temporary file storage
-const storage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    await fs.mkdir(UPLOADS_DIR, { recursive: true });
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
+// Custom storage that processes pieces as file is being written
+class StreamingProcessingStorage {
+  constructor() {
+    this.getDestination = async (req, file, cb) => {
+      await fs.mkdir(UPLOADS_DIR, { recursive: true });
+      cb(null, UPLOADS_DIR);
+    };
   }
-});
+
+  _handleFile(req, file, cb) {
+    // Get fileId from request (may be set by chunk/init)
+    const fileId = req.body.fileId || uuidv4();
+    const fileExtension = path.extname(file.originalname);
+    const finalFilename = `${fileId}${fileExtension}`;
+    const finalPath = path.join(UPLOADS_DIR, finalFilename);
+    
+    // Create write stream
+    const writeStream = require('fs').createWriteStream(finalPath);
+    const { getPieceSize, hashPiece } = require('../utils/chunking');
+    
+    let totalBytes = 0;
+    let pieceSize = null;
+    let totalPieces = 0;
+    let currentPiece = Buffer.alloc(0);
+    let currentPieceIndex = 0;
+    let currentOffset = 0;
+    let fileCreated = false;
+    let piecesCreated = false;
+    
+    // Process file metadata and create database entry as soon as we know the file is starting
+    file.stream.on('data', async (chunk) => {
+      totalBytes += chunk.length;
+      
+      // Determine piece size on first chunk
+      if (!pieceSize) {
+        // Estimate file size from Content-Length header if available
+        const estimatedSize = parseInt(req.headers['content-length']) || totalBytes;
+        pieceSize = getPieceSize(estimatedSize);
+        totalPieces = Math.ceil(estimatedSize / pieceSize);
+        
+        // Create file entry immediately
+        if (!fileCreated) {
+          fileCreated = true;
+          try {
+            await db.createFile({
+              id: fileId,
+              filename: finalFilename,
+              originalFilename: file.originalname,
+              size: estimatedSize,
+              pieceSize,
+              totalPieces,
+              mimeType: mimeTypes.lookup(file.originalname) || 'application/octet-stream',
+              filePath: finalPath
+            });
+            
+            // Create piece entries
+            const dbPieces = [];
+            for (let i = 0; i < totalPieces; i++) {
+              const offset = i * pieceSize;
+              const remainingBytes = estimatedSize - offset;
+              const currentPieceSize = Math.min(pieceSize, remainingBytes);
+              
+              dbPieces.push({
+                fileId,
+                pieceIndex: i,
+                hash: '',
+                size: currentPieceSize,
+                offset,
+                isComplete: 0
+              });
+            }
+            await db.createPieces(dbPieces);
+            piecesCreated = true;
+            console.log(`[${fileId}] Created file entry and ${totalPieces} pieces`);
+          } catch (err) {
+            console.error(`[${fileId}] Error creating file entry:`, err);
+          }
+        }
+      }
+      
+      // Accumulate chunks into pieces
+      currentPiece = Buffer.concat([currentPiece, chunk]);
+      
+      // Process complete pieces as they're formed
+      while (currentPiece.length >= pieceSize && piecesCreated) {
+        const pieceData = currentPiece.slice(0, pieceSize);
+        const hash = hashPiece(pieceData);
+        
+        // Mark piece as complete immediately
+        const pieceIndex = currentPieceIndex;
+        Promise.all([
+          db.updatePieceHash(fileId, pieceIndex, hash),
+          db.updatePieceComplete(fileId, pieceIndex, true)
+        ]).then(() => {
+          if (pieceIndex % 100 === 0) {
+            console.log(`[${fileId}] Processed piece ${pieceIndex + 1}/${totalPieces} during upload`);
+          }
+        }).catch(err => {
+          console.error(`[${fileId}] Error processing piece ${pieceIndex}:`, err);
+        });
+        
+        currentPiece = currentPiece.slice(pieceSize);
+        currentPieceIndex++;
+        currentOffset += pieceSize;
+      }
+      
+      // Write to disk
+      writeStream.write(chunk);
+    });
+    
+    file.stream.on('end', async () => {
+      // Handle remaining data (last partial piece)
+      if (currentPiece.length > 0 && piecesCreated) {
+        const hash = hashPiece(currentPiece);
+        const pieceIndex = currentPieceIndex;
+        
+        try {
+          await Promise.all([
+            db.updatePieceHash(fileId, pieceIndex, hash),
+            db.updatePieceComplete(fileId, pieceIndex, true)
+          ]);
+          console.log(`[${fileId}] Processed final piece ${pieceIndex + 1}/${totalPieces}`);
+        } catch (err) {
+          console.error(`[${fileId}] Error processing final piece:`, err);
+        }
+      }
+      
+      writeStream.end();
+      
+      // Update file size with actual size
+      try {
+        await db.updateFile(fileId, { size: totalBytes });
+      } catch (err) {
+        console.error(`[${fileId}] Error updating file size:`, err);
+      }
+      
+      cb(null, {
+        destination: UPLOADS_DIR,
+        filename: finalFilename,
+        path: finalPath,
+        size: totalBytes
+      });
+    });
+    
+    file.stream.on('error', (err) => {
+      writeStream.destroy();
+      cb(err);
+    });
+    
+    writeStream.on('error', (err) => {
+      cb(err);
+    });
+  }
+
+  _removeFile(req, file, cb) {
+    if (file.path) {
+      fs.unlink(file.path, cb);
+    } else {
+      cb(null);
+    }
+  }
+}
 
 const upload = multer({ 
-  storage,
+  storage: new StreamingProcessingStorage(),
   limits: { fileSize: 10 * 1024 * 1024 * 1024 } // 10GB limit
 });
 
 /**
- * Upload single or multiple files
+ * Upload single or multiple files with streaming processing
+ * Processes pieces as they're uploaded, not after upload completes
  */
 router.post('/files', upload.array('files'), async (req, res) => {
   try {
@@ -97,232 +250,30 @@ router.post('/files', upload.array('files'), async (req, res) => {
     }
     
     const results = [];
+    const processingPromises = [];
     
     for (const file of req.files) {
-      // Check if file was pre-initialized (via chunk/init)
-      // If so, use that fileId; otherwise create new one
-      // Note: multer puts form fields in req.body, but fileId might be in the form data
-      let fileId = req.body.fileId || (Array.isArray(req.body.fileId) ? req.body.fileId[0] : null);
-      let existingFile = null;
+      // File has already been processed during upload by StreamingProcessingStorage
+      // The fileId is in the filename (extracted from path)
+      const fileId = path.basename(file.filename, path.extname(file.filename));
+      const fileStats = await fs.stat(file.path);
       
-      if (fileId) {
-        existingFile = await db.getFileById(fileId);
+      // Get file info from database (already created by storage)
+      const dbFile = await db.getFileById(fileId);
+      if (!dbFile) {
+        console.error(`[${fileId}] File not found in database after upload`);
+        continue;
       }
       
-      if (!existingFile) {
-        fileId = uuidv4();
-      }
-      
-      const fileExtension = path.extname(file.originalname);
-      const finalFilename = `${fileId}${fileExtension}`;
-      const finalPath = path.join(UPLOADS_DIR, finalFilename);
-      
-      // Move file to final location
-      await fs.rename(file.path, finalPath);
-      
-      // Wait a moment to ensure file is fully written to disk
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-      // Get file size and determine piece size
-      const fileStats = await fs.stat(finalPath);
-      const fileSize = fileStats.size;
-      const { getPieceSize } = require('../utils/chunking');
-      const pieceSize = getPieceSize(fileSize);
-      const totalPieces = Math.ceil(fileSize / pieceSize);
-      
-      // Create or update file entry
-      if (!existingFile) {
-        await db.createFile({
-          id: fileId,
-          filename: finalFilename,
-          originalFilename: file.originalname,
-          size: fileSize,
-          pieceSize,
-          totalPieces,
-          mimeType: mimeTypes.lookup(file.originalname) || 'application/octet-stream',
-          filePath: finalPath
-        });
-        
-        // Create piece entries (initially incomplete)
-        const dbPieces = [];
-        for (let i = 0; i < totalPieces; i++) {
-          const offset = i * pieceSize;
-          const remainingBytes = fileSize - offset;
-          const currentPieceSize = Math.min(pieceSize, remainingBytes);
-          
-          dbPieces.push({
-            fileId,
-            pieceIndex: i,
-            hash: '', // Will be set during processing
-            size: currentPieceSize,
-            offset,
-            isComplete: 0
-          });
-        }
-        await db.createPieces(dbPieces);
-      } else {
-        // Update existing file entry with actual size
-        await db.updateFile(fileId, {
-          size: fileSize,
-          pieceSize: pieceSize,
-          totalPieces: totalPieces
-        });
-        
-        // Check if pieces exist and match the expected count
-        const existingPieces = await db.getPiecesByFileId(fileId);
-        
-        // If pieces don't exist or count doesn't match, recreate them
-        if (existingPieces.length === 0 || existingPieces.length !== totalPieces) {
-          console.log(`Recreating ${totalPieces} pieces for ${fileId} (had ${existingPieces.length})`);
-          
-          // Delete old pieces if they exist
-          if (existingPieces.length > 0) {
-            const sqlite3 = require('sqlite3').verbose();
-            const path = require('path');
-            const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../data');
-            const DB_PATH = path.join(DATA_DIR, 'files.db');
-            const database = new sqlite3.Database(DB_PATH);
-            
-            await new Promise((resolve, reject) => {
-              database.run(
-                `DELETE FROM pieces WHERE file_id = ?`,
-                [fileId],
-                (err) => {
-                  database.close();
-                  if (err) reject(err);
-                  else resolve();
-                }
-              );
-            });
-          }
-          
-          // Create new pieces
-          const dbPieces = [];
-          for (let i = 0; i < totalPieces; i++) {
-            const offset = i * pieceSize;
-            const remainingBytes = fileSize - offset;
-            const currentPieceSize = Math.min(pieceSize, remainingBytes);
-            
-            dbPieces.push({
-              fileId,
-              pieceIndex: i,
-              hash: '', // Will be set during processing
-              size: currentPieceSize,
-              offset,
-              isComplete: 0
-            });
-          }
-          await db.createPieces(dbPieces);
-        } else {
-          // Pieces exist and count matches
-          // Don't reset them - if they're already complete, keep them complete
-          // Only reset if we're sure this is a restart (which we can't easily detect)
-          // Instead, let the background processing handle updating them
-          console.log(`[${fileId}] Pieces already exist (${existingPieces.length}), will update during processing`);
-        }
-      }
-      
-      // Return immediately so file appears in list
+      // Return file info
       results.push({
         id: fileId,
         filename: file.originalname,
-        size: fileSize,
+        size: fileStats.size,
         url: `/api/download/${fileId}`,
-        pieceSize,
-        totalPieces
+        pieceSize: dbFile.piece_size,
+        totalPieces: dbFile.total_pieces
       });
-      
-      // Process file into pieces incrementally as they become available
-      // This allows pieces to be available for download progressively
-      // Process pieces in parallel batches for faster availability
-      (async () => {
-        try {
-          console.log(`[${fileId}] Starting incremental processing for file at ${finalPath}`);
-          
-          // Wait a moment for file to be fully written
-          await new Promise(resolve => setTimeout(resolve, 100));
-          
-          // Verify pieces exist in database
-          let dbPieces = await db.getPiecesByFileId(fileId);
-          if (dbPieces.length === 0) {
-            console.error(`[${fileId}] No pieces found in database!`);
-            return;
-          }
-          
-          // Process pieces incrementally using streaming
-          const { processFileStream } = require('../utils/chunking');
-          
-          // Track processed pieces for logging
-          let processedCount = 0;
-          const BATCH_SIZE = 10; // Process 10 pieces in parallel at a time
-          let currentBatch = [];
-          
-          // Use streaming processing - pieces are processed and marked complete as they're read
-          await processFileStream(finalPath, pieceSize, async (piece) => {
-            // Add to current batch
-            currentBatch.push(piece);
-            
-            // When batch is full, process all pieces in parallel
-            if (currentBatch.length >= BATCH_SIZE) {
-              const batch = [...currentBatch];
-              currentBatch = [];
-              
-              // Process batch in parallel (don't await - let it run in background)
-              Promise.all(batch.map(async (p) => {
-                try {
-                  const [hashResult, completeResult] = await Promise.all([
-                    db.updatePieceHash(fileId, p.pieceIndex, p.hash),
-                    db.updatePieceComplete(fileId, p.pieceIndex, true)
-                  ]);
-                  
-                  if (hashResult === 0 || completeResult === 0) {
-                    console.warn(`[${fileId}] Piece ${p.pieceIndex} update returned 0 changes`);
-                  } else {
-                    processedCount++;
-                    // Log progress every 100 pieces
-                    if (processedCount % 100 === 0) {
-                      console.log(`[${fileId}] Processed ${processedCount}/${totalPieces} pieces`);
-                    }
-                  }
-                } catch (err) {
-                  console.error(`[${fileId}] Error processing piece ${p.pieceIndex}:`, err);
-                }
-              })).catch(err => {
-                console.error(`[${fileId}] Error in batch processing:`, err);
-              });
-            }
-          });
-          
-          // Process any remaining pieces in the batch
-          if (currentBatch.length > 0) {
-            await Promise.all(currentBatch.map(async (p) => {
-              try {
-                const [hashResult, completeResult] = await Promise.all([
-                  db.updatePieceHash(fileId, p.pieceIndex, p.hash),
-                  db.updatePieceComplete(fileId, p.pieceIndex, true)
-                ]);
-                
-                if (hashResult > 0 && completeResult > 0) {
-                  processedCount++;
-                }
-              } catch (err) {
-                console.error(`[${fileId}] Error processing piece ${p.pieceIndex}:`, err);
-              }
-            }));
-          }
-          
-          // Wait a moment for all async processing to complete
-          await new Promise(resolve => setTimeout(resolve, 500));
-          
-          // Final verification
-          const finalPieces = await db.getPiecesByFileId(fileId);
-          const finalCompleteCount = finalPieces.filter(p => p.is_complete === 1).length;
-          console.log(`[${fileId}] Processing complete: ${finalCompleteCount}/${finalPieces.length} pieces marked complete`);
-        } catch (err) {
-          console.error(`[${fileId}] Error processing file:`, err);
-          console.error(err.stack);
-        }
-      })();
     }
     
     res.json({ 
