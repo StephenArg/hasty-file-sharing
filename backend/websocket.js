@@ -78,7 +78,7 @@ async function handleMessage(ws, message) {
  */
 async function handleUploadInit(ws, payload) {
   try {
-    const { filename, size, mimeType } = payload;
+    const { filename, size, mimeType, requestId } = payload;
 
     if (!filename || !size) {
       sendError(ws, 'UPLOAD_INIT_ERROR', 'Missing filename or size');
@@ -145,13 +145,16 @@ async function handleUploadInit(ws, payload) {
       ws
     });
 
-    // Send confirmation
+    // Send confirmation (echo back requestId and file info for matching)
     ws.send(JSON.stringify({
       type: 'UPLOAD_INIT_SUCCESS',
       payload: {
         fileId,
         pieceSize,
-        totalPieces
+        totalPieces,
+        requestId: payload.requestId, // Echo back request ID
+        filename: filename, // Include filename for matching
+        size: size // Include size for matching
       }
     }));
 
