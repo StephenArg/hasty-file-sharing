@@ -162,16 +162,10 @@ router.post('/files', upload.array('files'), async (req, res) => {
         await db.createPieces(dbPieces);
       } else {
         // Update existing file entry with actual size
-        const database = require('../database').getDB();
-        await new Promise((resolve, reject) => {
-          database.run(
-            `UPDATE files SET size = ?, piece_size = ?, total_pieces = ? WHERE id = ?`,
-            [fileSize, pieceSize, totalPieces, fileId],
-            (err) => {
-              if (err) reject(err);
-              else resolve();
-            }
-          );
+        await db.updateFile(fileId, {
+          size: fileSize,
+          pieceSize: pieceSize,
+          totalPieces: totalPieces
         });
         
         // Check if pieces exist and match the expected count

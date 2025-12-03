@@ -227,6 +227,39 @@ function getFileCount() {
   });
 }
 
+function updateFile(fileId, updates) {
+  return new Promise((resolve, reject) => {
+    const database = getDB();
+    const fields = [];
+    const values = [];
+    
+    if (updates.size !== undefined) {
+      fields.push('size = ?');
+      values.push(updates.size);
+    }
+    if (updates.pieceSize !== undefined) {
+      fields.push('piece_size = ?');
+      values.push(updates.pieceSize);
+    }
+    if (updates.totalPieces !== undefined) {
+      fields.push('total_pieces = ?');
+      values.push(updates.totalPieces);
+    }
+    
+    if (fields.length === 0) {
+      return resolve(0);
+    }
+    
+    values.push(fileId);
+    const sql = `UPDATE files SET ${fields.join(', ')} WHERE id = ?`;
+    
+    database.run(sql, values, function(err) {
+      if (err) reject(err);
+      else resolve(this.changes);
+    });
+  });
+}
+
 module.exports = {
   initialize,
   createFile,
@@ -238,6 +271,7 @@ module.exports = {
   getAllFiles,
   deleteFile,
   getTotalStorageUsed,
-  getFileCount
+  getFileCount,
+  updateFile
 };
 
