@@ -1,9 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { wsDownloadManager } from '../utils/websocketDownload';
 
-const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete }) => {
-  const [downloadStatus, setDownloadStatus] = useState(null);
-  const [isDownloading, setIsDownloading] = useState(false);
+const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadStatus, setDownloadStatus, isDownloading, setIsDownloading }) => {
 
   useEffect(() => {
     // Check if download is already in progress

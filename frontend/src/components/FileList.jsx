@@ -4,6 +4,8 @@ import ProgressiveDownload from './ProgressiveDownload';
 const FileList = ({ files, onDelete }) => {
   const [copiedId, setCopiedId] = useState(null);
   const [fileInfo, setFileInfo] = useState({});
+  const [downloadStatus, setDownloadStatus] = useState(null);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 Bytes';
@@ -166,6 +168,45 @@ const FileList = ({ files, onDelete }) => {
                 >
                   {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
                 </button>
+                <div className="file-actions">
+                  {(isDownloading || (file.id && !file.id.startsWith('temp-'))) && (
+                    <ProgressiveDownload
+                      downloadStatus={downloadStatus}
+                      setDownloadStatus={setDownloadStatus}
+                      isDownloading={isDownloading}
+                      setIsDownloading={setIsDownloading}
+                      fileId={file.id}
+                      filename={file.original_filename || file.filename}
+                      fileInfo={info}
+                      onComplete={() => {
+                        // Refresh file info after download completes
+                        fetchFileInfo(file.id);
+                      }}
+                    />
+                  )}
+                  {isComplete && file.id && !file.id.startsWith('temp-') && !isDownloading && (
+                    <button
+                      className="btn btn-small btn-success"
+                      onClick={() => handleDownload(file.id, file.original_filename || file.filename)}
+                      style={{ marginLeft: '5px' }}
+                    >
+                      ⬇️ Direct Download
+                    </button>
+                  )}
+                  {file.id && !file.id.startsWith('temp-') && !isDownloading && (
+                    <button
+                      className="btn btn-small btn-danger"
+                      onClick={() => {
+                        if (window.confirm('Are you sure you want to delete this file?')) {
+                          onDelete(file.id);
+                        }
+                      }}
+                      style={{ marginLeft: '5px' }}
+                    >
+                      🗑️ Delete
+                    </button>
+                  )}
+                </div>
               </div>
               {!isComplete && info && info.completePieces > 0 && (
                 <div className="piece-downloads">
@@ -187,41 +228,7 @@ const FileList = ({ files, onDelete }) => {
                 </div>
               )}
             </div>
-            <div className="file-actions">
-              {file.id && !file.id.startsWith('temp-') && (
-                <ProgressiveDownload
-                  fileId={file.id}
-                  filename={file.original_filename || file.filename}
-                  fileInfo={info}
-                  onComplete={() => {
-                    // Refresh file info after download completes
-                    fetchFileInfo(file.id);
-                  }}
-                />
-              )}
-              {isComplete && file.id && !file.id.startsWith('temp-') && (
-                <button
-                  className="btn btn-small btn-success"
-                  onClick={() => handleDownload(file.id, file.original_filename || file.filename)}
-                  style={{ marginLeft: '5px' }}
-                >
-                  ⬇️ Direct Download
-                </button>
-              )}
-              {file.id && !file.id.startsWith('temp-') && (
-                <button
-                  className="btn btn-small btn-danger"
-                  onClick={() => {
-                    if (window.confirm('Are you sure you want to delete this file?')) {
-                      onDelete(file.id);
-                    }
-                  }}
-                  style={{ marginLeft: '5px' }}
-                >
-                  🗑️ Delete
-                </button>
-              )}
-            </div>
+            
           </div>
         );
       })}
