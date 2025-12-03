@@ -1,6 +1,6 @@
 services:
   hasty-file-send:
-    image: your-dockerhub-username/hasty-file-send:latest
+    image: vero23/hasty-file-send:latest
     container_name: hasty-file-send
     ports:
       - "8087:3000"
