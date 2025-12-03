@@ -203,7 +203,7 @@ const FileList = ({ files, onDelete, showDelete = true }) => {
                   {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
                 </button>
                 <div className="file-actions">
-                  {isDownloading[file.id] || (!isComplete && file.id && !file.id.startsWith('temp-')) && (
+                  {((!isComplete && file.id && !file.id.startsWith('temp-')) || (isComplete && (isDownloading[file.id] || (downloadStatus[file.id] && downloadStatus[file.id].status !== 'completed')))) && (
                     <ProgressiveDownload
                       downloadStatus={downloadStatus[file.id] || null}
                       setDownloadStatus={(status) => {

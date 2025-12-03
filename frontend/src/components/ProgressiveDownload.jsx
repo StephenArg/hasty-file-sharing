@@ -11,7 +11,7 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadS
 
   const startDownload = async () => {
     console.log('Starting download for file:', fileId, filename);
-    setIsDownloading(true);
+    // Set both states immediately to ensure component stays visible
     setDownloadStatus({
       fileId,
       filename,
@@ -19,10 +19,11 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadS
       progress: 0,
       message: 'Starting download...'
     });
+    setIsDownloading(true);
 
     try {
       // Start WebSocket download
-      await wsDownloadManager.startDownload(
+      const result = await wsDownloadManager.startDownload(
         fileId,
         filename,
         (status) => {
@@ -51,15 +52,33 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadS
           if (onComplete) {
             onComplete(fileId);
           }
+          // Clear download status after a delay so "Download Complete" message is visible
+          setTimeout(() => {
+            setDownloadStatus(null);
+          }, 3000);
         }
       );
+      
+      // If download manager returns early (e.g., already in progress), 
+      // keep the status visible
+      if (result === undefined) {
+        // Download might already be in progress, update status to reflect that
+        setDownloadStatus(prev => prev || {
+          fileId,
+          filename,
+          status: 'downloading',
+          progress: 0,
+          message: 'Download in progress...'
+        });
+      }
     } catch (err) {
       console.error('Download error:', err);
       setDownloadStatus({
         fileId,
         filename,
         status: 'error',
-        error: err.message
+        error: err.message,
+        message: `Error: ${err.message}`
       });
       setIsDownloading(false);
     }
@@ -79,6 +98,7 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadS
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
   };
 
+  // Show button if no download status and not currently downloading
   if (!downloadStatus && !isDownloading) {
     return (
       <button
@@ -90,6 +110,9 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete, downloadS
       </button>
     );
   }
+
+  // If download status exists but isDownloading is false, keep showing the status
+  // (this handles cases where download completed, errored, or was cancelled)
 
   if (downloadStatus?.status === 'completed') {
     return (
