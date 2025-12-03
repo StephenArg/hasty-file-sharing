@@ -158,8 +158,15 @@ function updatePieceHash(fileId, pieceIndex, hash) {
       `UPDATE pieces SET hash = ? WHERE file_id = ? AND piece_index = ?`,
       [hash, fileId, pieceIndex],
       function(err) {
-        if (err) reject(err);
-        else resolve(this.changes);
+        if (err) {
+          console.error(`Error updating hash for piece ${pieceIndex} of ${fileId}:`, err);
+          reject(err);
+        } else {
+          if (this.changes === 0) {
+            console.warn(`No piece found to update hash: fileId=${fileId}, pieceIndex=${pieceIndex}`);
+          }
+          resolve(this.changes);
+        }
       }
     );
   });
