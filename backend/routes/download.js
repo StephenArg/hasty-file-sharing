@@ -78,7 +78,113 @@ router.get('/:fileId', async (req, res) => {
       return;
     }
     
-    // Download entire file
+    // Check if file is still being processed (not all pieces complete)
+    const pieces = await db.getPiecesByFileId(fileId);
+    const completePieces = pieces.filter(p => p.is_complete === 1);
+    const allComplete = completePieces.length === file.total_pieces && file.total_pieces > 0;
+    
+    // If file is not complete, stream available pieces and wait for more
+    if (!allComplete && file.total_pieces > 0) {
+      res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${file.original_filename || file.filename}"`);
+      res.setHeader('Transfer-Encoding', 'chunked'); // Use chunked encoding for streaming
+      res.setHeader('Cache-Control', 'no-cache');
+      
+      // Stream available pieces first
+      const availablePieces = pieces
+        .filter(p => p.is_complete === 1)
+        .sort((a, b) => a.piece_index - b.piece_index);
+      
+      let streamedBytes = 0;
+      
+      // Stream all available pieces
+      for (const piece of availablePieces) {
+        try {
+          const fd = await fs.open(file.file_path, 'r');
+          try {
+            const buffer = Buffer.alloc(piece.size);
+            const readResult = await fd.read(buffer, 0, piece.size, piece.offset);
+            
+            if (readResult.bytesRead > 0) {
+              res.write(buffer.slice(0, readResult.bytesRead));
+              streamedBytes += readResult.bytesRead;
+            }
+          } finally {
+            await fd.close();
+          }
+        } catch (err) {
+          console.error(`Error streaming piece ${piece.piece_index}:`, err);
+        }
+      }
+      
+      // Now poll for new pieces and stream them as they become available
+      const pollInterval = setInterval(async () => {
+        try {
+          // Check if client disconnected
+          if (res.closed || res.destroyed) {
+            clearInterval(pollInterval);
+            return;
+          }
+          
+          // Get updated piece status
+          const updatedPieces = await db.getPiecesByFileId(fileId);
+          const newCompletePieces = updatedPieces
+            .filter(p => p.is_complete === 1 && p.piece_index >= availablePieces.length)
+            .sort((a, b) => a.piece_index - b.piece_index);
+          
+          // Stream any new complete pieces
+          for (const piece of newCompletePieces) {
+            try {
+              const fd = await fs.open(file.file_path, 'r');
+              try {
+                const buffer = Buffer.alloc(piece.size);
+                const readResult = await fd.read(buffer, 0, piece.size, piece.offset);
+                
+                if (readResult.bytesRead > 0) {
+                  res.write(buffer.slice(0, readResult.bytesRead));
+                  streamedBytes += readResult.bytesRead;
+                  availablePieces.push(piece);
+                }
+              } finally {
+                await fd.close();
+              }
+            } catch (err) {
+              console.error(`Error streaming new piece ${piece.piece_index}:`, err);
+            }
+          }
+          
+          // Check if all pieces are now complete
+          const allPiecesNow = updatedPieces.filter(p => p.is_complete === 1).length;
+          if (allPiecesNow === file.total_pieces) {
+            clearInterval(pollInterval);
+            res.end(); // Close the response
+          }
+        } catch (err) {
+          console.error('Error polling for new pieces:', err);
+          clearInterval(pollInterval);
+          if (!res.headersSent || !res.closed) {
+            res.end();
+          }
+        }
+      }, 1000); // Poll every second
+      
+      // Clean up on client disconnect
+      res.on('close', () => {
+        clearInterval(pollInterval);
+      });
+      
+      // Set a timeout to prevent hanging forever (e.g., 10 minutes)
+      setTimeout(() => {
+        clearInterval(pollInterval);
+        if (!res.closed && !res.destroyed) {
+          res.end();
+        }
+      }, 10 * 60 * 1000);
+      
+      return;
+    }
+    
+    // Download entire file (all pieces complete)
     const fileStats = await fs.stat(file.file_path);
     
     res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');

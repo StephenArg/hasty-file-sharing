@@ -225,14 +225,19 @@ class DownloadManager {
           }
 
           if (onProgress) {
-            const progress = (download.downloadedPieces.length / fileInfo.totalPieces) * 100;
+            const progress = fileInfo.totalPieces > 0 
+              ? (download.downloadedPieces.length / fileInfo.totalPieces) * 100 
+              : 0;
             onProgress({
               ...download,
-              progress,
+              progress: Math.min(100, Math.max(0, progress)),
               status: 'downloading',
               message: `Downloaded ${download.downloadedPieces.length}/${fileInfo.totalPieces} pieces`
             });
           }
+          
+          // Save progress update
+          await this.saveDownloadInfo(fileId, download);
         }
       } catch (err) {
         console.error(`Error downloading piece ${piece.index}:`, err);
@@ -256,17 +261,31 @@ class DownloadManager {
       const response = await fetch(`/api/download/${fileId}/info`);
       const updatedInfo = await response.json();
       
-      if (updatedInfo.completePieces > download.downloadedPieces.length) {
-        await this.downloadPieces(fileId, updatedInfo, download, onProgress);
-      } else if (onProgress) {
+      // Update progress based on available pieces
+      if (onProgress && updatedInfo.totalPieces > 0) {
+        const currentProgress = (download.downloadedPieces.length / updatedInfo.totalPieces) * 100;
         onProgress({
           ...download,
-          status: 'waiting',
-          message: 'Waiting for more pieces...'
+          progress: Math.min(100, Math.max(0, currentProgress)),
+          status: updatedInfo.completePieces > download.downloadedPieces.length ? 'downloading' : 'waiting',
+          message: updatedInfo.completePieces > download.downloadedPieces.length 
+            ? `Downloaded ${download.downloadedPieces.length}/${updatedInfo.totalPieces} pieces` 
+            : `Waiting for more pieces... (${updatedInfo.completePieces}/${updatedInfo.totalPieces} available)`
         });
+      }
+      
+      if (updatedInfo.completePieces > download.downloadedPieces.length) {
+        await this.downloadPieces(fileId, updatedInfo, download, onProgress);
       }
     } catch (err) {
       console.error('Error checking for new pieces:', err);
+      if (onProgress) {
+        onProgress({
+          ...download,
+          status: 'error',
+          message: `Error: ${err.message}`
+        });
+      }
     }
   }
 
