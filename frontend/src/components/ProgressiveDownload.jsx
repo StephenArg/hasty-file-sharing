@@ -1,20 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import downloadManager from '../utils/downloadManager';
+import { wsDownloadManager } from '../utils/websocketDownload';
 
 const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete }) => {
   const [downloadStatus, setDownloadStatus] = useState(null);
   const [isDownloading, setIsDownloading] = useState(false);
 
   useEffect(() => {
-    // Check if download already exists
-    const existing = downloadManager.getDownloadStatus(fileId);
-    if (existing) {
-      setDownloadStatus(existing);
-      if (existing.status === 'downloading' || existing.status === 'waiting') {
-        setIsDownloading(true);
-        resumeDownload();
-      }
-    }
+    // Check if download is already in progress
+    // WebSocket downloads are tracked in wsDownloadManager
+    // For now, we'll start fresh each time
   }, [fileId]);
 
   const startDownload = async () => {
@@ -28,30 +22,36 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete }) => {
     });
 
     try {
-      // Fetch file info if not provided
-      let info = fileInfo;
-      if (!info) {
-        const response = await fetch(`/api/download/${fileId}/info`);
-        info = await response.json();
-      }
-
-      // Start download
-      const download = await downloadManager.startDownload(
+      // Start WebSocket download
+      await wsDownloadManager.startDownload(
         fileId,
         filename,
-        info,
         (status) => {
-          setDownloadStatus(status);
-          if (status.status === 'completed') {
-            setIsDownloading(false);
-            if (onComplete) {
-              onComplete(fileId);
-            }
+          setDownloadStatus({
+            fileId,
+            filename,
+            status: 'downloading',
+            progress: status.progress,
+            message: `Downloaded ${status.receivedChunks}/${status.totalPieces} chunks`,
+            receivedChunks: status.receivedChunks,
+            totalPieces: status.totalPieces
+          });
+        },
+        () => {
+          // Download complete
+          setDownloadStatus({
+            fileId,
+            filename,
+            status: 'completed',
+            progress: 100,
+            message: 'Download complete'
+          });
+          setIsDownloading(false);
+          if (onComplete) {
+            onComplete(fileId);
           }
         }
       );
-
-      setDownloadStatus(download);
     } catch (err) {
       console.error('Download error:', err);
       setDownloadStatus({
@@ -64,33 +64,8 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete }) => {
     }
   };
 
-  const resumeDownload = async () => {
-    try {
-      const response = await fetch(`/api/download/${fileId}/info`);
-      const info = await response.json();
-
-      await downloadManager.startDownload(
-        fileId,
-        filename,
-        info,
-        (status) => {
-          setDownloadStatus(status);
-          if (status.status === 'completed') {
-            setIsDownloading(false);
-            if (onComplete) {
-              onComplete(fileId);
-            }
-          }
-        }
-      );
-    } catch (err) {
-      console.error('Resume error:', err);
-      setIsDownloading(false);
-    }
-  };
-
   const cancelDownload = async () => {
-    await downloadManager.cancelDownload(fileId);
+    await wsDownloadManager.cancelDownload(fileId);
     setDownloadStatus(null);
     setIsDownloading(false);
   };
@@ -122,7 +97,7 @@ const ProgressiveDownload = ({ fileId, filename, fileInfo, onComplete }) => {
   }
 
   const progress = downloadStatus?.progress || 0;
-  const downloadedPieces = downloadStatus?.downloadedPieces?.length || 0;
+  const downloadedPieces = downloadStatus?.receivedChunks || downloadStatus?.downloadedPieces?.length || 0;
   const totalPieces = downloadStatus?.totalPieces || fileInfo?.totalPieces || 0;
 
   return (

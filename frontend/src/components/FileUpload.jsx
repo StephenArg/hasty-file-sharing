@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import JSZip from 'jszip';
+import { uploadFileViaWebSocket } from '../utils/websocketUpload';
 
 const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onFileStart }) => {
   const [isDragging, setIsDragging] = useState(false);
@@ -18,115 +19,58 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
   // Alias for consistency with other components
   const formatBytes = formatFileSize;
 
-  const uploadFileWithProgress = (file, index, totalFiles, fileId = null) => {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      const formData = new FormData();
-      formData.append('files', file);
-      if (fileId) {
-        formData.append('fileId', fileId);
-      }
-
-      const startTime = Date.now();
-      let lastUpdateTime = startTime;
-      let lastLoaded = 0;
-
-      // Track progress - use requestAnimationFrame for smoother updates
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable && e.total > 0) {
-          const now = Date.now();
-          const progress = Math.min(100, Math.round((e.loaded / e.total) * 100));
-          const elapsed = (now - startTime) / 1000;
-          
-          // Calculate speed based on recent progress
-          const timeDelta = (now - lastUpdateTime) / 1000;
-          const loadedDelta = e.loaded - lastLoaded;
-          const speed = timeDelta > 0 && loadedDelta > 0 
-            ? formatFileSize(loadedDelta / timeDelta) + '/s' 
-            : elapsed > 0 
-              ? formatFileSize(e.loaded / elapsed) + '/s' 
-              : '';
-          
-          lastUpdateTime = now;
-          lastLoaded = e.loaded;
-          
-          // Force state update - always update to ensure React re-renders
+  const uploadFileWithProgress = async (file, index, totalFiles, fileId = null) => {
+    try {
+      // Upload via WebSocket
+      const result = await uploadFileViaWebSocket(
+        file,
+        (progress) => {
+          // Update progress
           setUploadProgress(prev => {
             const updated = [...prev];
             updated[index] = {
               filename: file.name,
-              progress,
-              loaded: e.loaded,
-              total: e.total,
-              speed,
-              timestamp: Date.now() // Add timestamp to force re-render
+              progress: progress.progress,
+              loaded: progress.loaded,
+              total: progress.total,
+              speed: progress.speed || '',
+              timestamp: Date.now()
             };
             if (onUploadProgress) {
               onUploadProgress(updated);
             }
             return updated;
           });
-        }
-      });
-
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            const data = JSON.parse(xhr.responseText);
-            // Update progress to 100%
-            setUploadProgress(prev => {
-              const updated = [...prev];
-              updated[index] = {
-                ...updated[index],
-                progress: 100
-              };
-              return updated;
-            });
-            // Notify that file upload completed and is available (even if still processing)
-            // Backend creates file entry immediately, so file is ready for download
-            if (data.success && data.files && data.files.length > 0) {
-              // Call onFileStart for each file in the response
-              data.files.forEach(fileData => {
-                if (onFileStart) {
-                  onFileStart({
-                    id: fileData.id,
-                    filename: fileData.filename,
-                    size: fileData.size,
-                    totalPieces: fileData.totalPieces,
-                    pieceSize: fileData.pieceSize,
-                    uploadComplete: true
-                  });
-                }
-              });
-            }
-            resolve(data);
-          } catch (err) {
-            console.error('Error parsing upload response:', err, xhr.responseText);
-            reject(new Error('Failed to parse response'));
-          }
-        } else {
-          try {
-            const data = JSON.parse(xhr.responseText);
-            const error = new Error(data.error || 'Upload failed');
-            error.response = { json: () => Promise.resolve(data) };
-            reject(error);
-          } catch (err) {
-            reject(new Error(`Upload failed: ${xhr.statusText}`));
+        },
+        (fileData) => {
+          // File started
+          if (onFileStart) {
+            onFileStart(fileData);
           }
         }
+      );
+
+      // Update progress to 100%
+      setUploadProgress(prev => {
+        const updated = [...prev];
+        updated[index] = {
+          ...updated[index],
+          progress: 100
+        };
+        return updated;
       });
 
-      xhr.addEventListener('error', () => {
-        reject(new Error('Upload failed'));
-      });
-
-      xhr.addEventListener('abort', () => {
-        reject(new Error('Upload aborted'));
-      });
-
-      xhr.open('POST', '/api/upload/files');
-      xhr.send(formData);
-    });
+      return {
+        success: true,
+        files: [{
+          id: result.fileId,
+          filename: file.name,
+          size: file.size
+        }]
+      };
+    } catch (err) {
+      throw err;
+    }
   };
 
   const uploadFiles = async (filesToUpload) => {
@@ -146,74 +90,10 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
     setUploadProgress(initialProgress);
 
     try {
-      // First, initialize all file entries in the backend (creates file entries immediately)
-      // This is fast, so we do it sequentially to avoid race conditions
-      const fileIdMap = new Map();
-      for (let i = 0; i < filesArray.length; i++) {
-        const file = filesArray[i];
-        try {
-          // Update progress to show initialization
-          setUploadProgress(prev => {
-            const updated = [...prev];
-            if (updated[i]) {
-              updated[i] = {
-                ...updated[i],
-                speed: 'Initializing...'
-              };
-            }
-            return updated;
-          });
-          
-          const mimeType = file.type || 'application/octet-stream';
-          const response = await fetch('/api/upload/chunk/init', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              filename: file.name,
-              size: file.size,
-              mimeType
-            })
-          });
-          
-          if (response.ok) {
-            const data = await response.json();
-            fileIdMap.set(file.name, data.fileId);
-            // Notify that file entry was created - file is now available for download
-            if (onFileStart && data.success) {
-              onFileStart({
-                id: data.fileId,
-                filename: file.name,
-                size: file.size,
-                totalPieces: data.totalPieces,
-                pieceSize: data.pieceSize,
-                uploadComplete: false // Still uploading
-              });
-            }
-            
-            // Update progress to show ready for upload
-            setUploadProgress(prev => {
-              const updated = [...prev];
-              if (updated[i]) {
-                updated[i] = {
-                  ...updated[i],
-                  speed: 'Starting upload...'
-                };
-              }
-              return updated;
-            });
-          } else {
-            console.error(`Failed to initialize ${file.name}`);
-          }
-        } catch (err) {
-          console.error(`Failed to initialize ${file.name}:`, err);
-        }
-      }
-      
-      // Now upload files using the regular endpoint (which will update the existing entries)
-      // Upload files in parallel to see progress for all files simultaneously
+      // Upload files via WebSocket (files are initialized during upload)
+      // Upload files sequentially to avoid overwhelming the connection
       const uploadPromises = filesArray.map((file, i) => {
-        const fileId = fileIdMap.get(file.name);
-        return uploadFileWithProgress(file, i, filesArray.length, fileId)
+        return uploadFileWithProgress(file, i, filesArray.length)
           .then(result => ({ success: true, result, index: i }))
           .catch(err => ({ success: false, error: err, index: i, filename: file.name }))
       });
@@ -318,17 +198,14 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
         speed: 'Uploading...'
       }]);
 
-      // Create form data
-      const formData = new FormData();
+      // Create file from blob
       const zipFile = new File([zipBlob], zipName, { type: 'application/zip' });
-      formData.append('directory', zipFile);
-      formData.append('originalName', zipName);
 
-      // Upload with progress
+      // Upload via WebSocket
       const result = await uploadFileWithProgress(zipFile, 0);
       
       if (result.success) {
-        onSuccess([result.file]);
+        onSuccess(result.files);
       }
       
       setTimeout(() => {
@@ -411,7 +288,7 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
                 ></div>
               </div>
               <div className="upload-progress-details">
-                <span>{formatFileSize(upload.loaded)} / {formatFileSize(upload.total)}</span>
+                <span>{upload.loaded} / {upload.total} chunks</span>
                 {upload.speed && <span className="upload-speed">{upload.speed}</span>}
               </div>
             </div>

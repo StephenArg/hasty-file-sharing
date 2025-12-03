@@ -1,4 +1,5 @@
 const express = require('express');
+const http = require('http');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs').promises;
@@ -6,8 +7,10 @@ const db = require('./database');
 const uploadRoutes = require('./routes/upload');
 const downloadRoutes = require('./routes/download');
 const fileRoutes = require('./routes/files');
+const { initializeWebSocket } = require('./websocket');
 
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../uploads');
@@ -98,8 +101,12 @@ async function start() {
   await ensureDirectories();
   await db.initialize();
   
-  app.listen(PORT, () => {
+  // Initialize WebSocket server
+  initializeWebSocket(server);
+  
+  server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`WebSocket server initialized`);
     console.log(`Data directory: ${DATA_DIR}`);
     console.log(`Uploads directory: ${UPLOADS_DIR}`);
   });
