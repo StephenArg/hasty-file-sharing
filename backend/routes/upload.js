@@ -158,7 +158,7 @@ router.post('/files', upload.array('files'), async (req, res) => {
         }
         await db.createPieces(dbPieces);
       } else {
-        // Update existing file entry with actual size and ensure pieces exist
+        // Update existing file entry with actual size
         const database = require('../database').getDB();
         await new Promise((resolve, reject) => {
           database.run(
@@ -171,9 +171,28 @@ router.post('/files', upload.array('files'), async (req, res) => {
           );
         });
         
-        // Check if pieces exist, if not create them
+        // Check if pieces exist and match the expected count
         const existingPieces = await db.getPiecesByFileId(fileId);
-        if (existingPieces.length === 0) {
+        
+        // If pieces don't exist or count doesn't match, recreate them
+        if (existingPieces.length === 0 || existingPieces.length !== totalPieces) {
+          console.log(`Recreating ${totalPieces} pieces for ${fileId} (had ${existingPieces.length})`);
+          
+          // Delete old pieces if they exist
+          if (existingPieces.length > 0) {
+            await new Promise((resolve, reject) => {
+              database.run(
+                `DELETE FROM pieces WHERE file_id = ?`,
+                [fileId],
+                (err) => {
+                  if (err) reject(err);
+                  else resolve();
+                }
+              );
+            });
+          }
+          
+          // Create new pieces
           const dbPieces = [];
           for (let i = 0; i < totalPieces; i++) {
             const offset = i * pieceSize;
@@ -190,6 +209,15 @@ router.post('/files', upload.array('files'), async (req, res) => {
             });
           }
           await db.createPieces(dbPieces);
+        } else {
+          // Pieces exist and count matches, but reset them to incomplete
+          // in case the upload is restarting
+          console.log(`Resetting ${existingPieces.length} pieces to incomplete for ${fileId}`);
+          await Promise.all(
+            existingPieces.map(p => 
+              db.updatePieceComplete(fileId, p.piece_index, false)
+            )
+          );
         }
       }
       
@@ -204,19 +232,31 @@ router.post('/files', upload.array('files'), async (req, res) => {
       });
       
       // Process file into pieces in the background (async, don't await)
-      processFile(finalPath).then(({ pieces }) => {
-        // Update pieces with hashes and mark as complete
-        Promise.all(pieces.map(piece => 
-          Promise.all([
-            db.updatePieceHash(fileId, piece.pieceIndex, piece.hash),
-            db.updatePieceComplete(fileId, piece.pieceIndex, true)
-          ])
-        )).catch(err => {
-          console.error(`Error updating pieces for ${fileId}:`, err);
+      // Use the actual piece size from the file entry to ensure consistency
+      processFile(finalPath, pieceSize)
+        .then(({ pieces }) => {
+          console.log(`Processing ${pieces.length} pieces for ${fileId}`);
+          // Update pieces with hashes and mark as complete
+          return Promise.all(pieces.map(piece => 
+            Promise.all([
+              db.updatePieceHash(fileId, piece.pieceIndex, piece.hash).catch(err => {
+                console.error(`Error updating hash for piece ${piece.pieceIndex} of ${fileId}:`, err);
+                throw err;
+              }),
+              db.updatePieceComplete(fileId, piece.pieceIndex, true).catch(err => {
+                console.error(`Error marking piece ${piece.pieceIndex} complete for ${fileId}:`, err);
+                throw err;
+              })
+            ])
+          ));
+        })
+        .then(() => {
+          console.log(`Successfully processed all pieces for ${fileId}`);
+        })
+        .catch(err => {
+          console.error(`Error processing file ${fileId}:`, err);
+          console.error(err.stack);
         });
-      }).catch(err => {
-        console.error(`Error processing file ${fileId}:`, err);
-      });
     }
     
     res.json({ 

@@ -69,7 +69,8 @@ const FileList = ({ files, onDelete }) => {
     const interval = setInterval(() => {
       files.forEach(file => {
         const info = fileInfo[file.id];
-        if (!info || (info.completePieces < info.totalPieces)) {
+        // Always poll if no info, or if file is incomplete
+        if (!info || (info.totalPieces > 0 && info.completePieces < info.totalPieces)) {
           fetchFileInfo(file.id);
         }
       });

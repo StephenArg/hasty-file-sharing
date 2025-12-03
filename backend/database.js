@@ -137,8 +137,15 @@ function updatePieceComplete(fileId, pieceIndex, isComplete) {
       `UPDATE pieces SET is_complete = ? WHERE file_id = ? AND piece_index = ?`,
       [isComplete ? 1 : 0, fileId, pieceIndex],
       function(err) {
-        if (err) reject(err);
-        else resolve(this.changes);
+        if (err) {
+          console.error(`Error updating piece ${pieceIndex} for ${fileId}:`, err);
+          reject(err);
+        } else {
+          if (this.changes === 0) {
+            console.warn(`No piece found to update: fileId=${fileId}, pieceIndex=${pieceIndex}`);
+          }
+          resolve(this.changes);
+        }
       }
     );
   });
