@@ -23,17 +23,37 @@ function App() {
     try {
       const response = await fetch('/api/files');
       const data = await response.json();
-      setFiles(data.files || []);
+      console.log('Fetched files from API:', data.files);
+      // Merge with existing files instead of replacing (to preserve any that were just added)
+      setFiles(prev => {
+        const serverFiles = data.files || [];
+        const existingIds = new Set(prev.map(f => f.id));
+        const newServerFiles = serverFiles.filter(f => !existingIds.has(f.id));
+        // If we have new files from server, add them; otherwise keep existing
+        if (newServerFiles.length > 0) {
+          return [...newServerFiles, ...prev];
+        }
+        // If server has files we don't have, use server data (more authoritative)
+        const serverIds = new Set(serverFiles.map(f => f.id));
+        const missingFromServer = prev.filter(f => !serverIds.has(f.id));
+        if (missingFromServer.length === 0 && serverFiles.length > 0) {
+          return serverFiles;
+        }
+        return prev;
+      });
     } catch (err) {
       console.error('Error fetching files:', err);
     }
   }, []);
 
   useEffect(() => {
+    // Only fetch files on initial load, not on every render
     fetchFiles();
-  }, [fetchFiles]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Empty deps - only run once on mount
 
   const handleUploadSuccess = (uploadedFiles) => {
+    console.log('Upload success, files:', uploadedFiles);
     setSuccess(`Successfully uploaded ${uploadedFiles.length} file(s)!`);
     setError(null);
     // Immediately add files to list (they're being processed in background)
@@ -43,17 +63,18 @@ function App() {
         filename: f.filename,
         original_filename: f.filename,
         size: f.size,
-        total_pieces: f.totalPieces,
-        piece_size: f.pieceSize,
+        total_pieces: f.totalPieces || f.total_pieces || 0,
+        piece_size: f.pieceSize || f.piece_size || 0,
         created_at: new Date().toISOString()
       }));
+      console.log('Adding files to list:', newFiles);
       // Merge with existing, avoiding duplicates
       const existingIds = new Set(prev.map(f => f.id));
       const uniqueNew = newFiles.filter(f => !existingIds.has(f.id));
-      return [...uniqueNew, ...prev];
+      const updated = [...uniqueNew, ...prev];
+      console.log('Updated files list:', updated);
+      return updated;
     });
-    // Also fetch to get any updates
-    fetchFiles();
     // Refresh storage stats after upload
     setTimeout(() => {
       window.dispatchEvent(new Event('storageRefresh'));
@@ -126,6 +147,7 @@ function App() {
         onLoadingChange={setLoading}
         storageStats={storageStats}
         onFileStart={(file) => {
+          console.log('onFileStart called with:', file);
           // Add file to list - backend already created the entry, so file is ready
           setFiles(prev => {
             const existingIds = new Set(prev.map(f => f.id));
@@ -139,8 +161,10 @@ function App() {
                 piece_size: file.pieceSize || file.piece_size || 0,
                 created_at: new Date().toISOString()
               };
+              console.log('Adding file via onFileStart:', newFile);
               return [newFile, ...prev];
             }
+            console.log('File already exists:', file.id);
             return prev;
           });
           

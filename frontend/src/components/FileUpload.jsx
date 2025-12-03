@@ -81,17 +81,24 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
             });
             // Notify that file upload completed and is available (even if still processing)
             // Backend creates file entry immediately, so file is ready for download
-            if (data.success && data.files && data.files.length > 0 && onFileStart) {
+            if (data.success && data.files && data.files.length > 0) {
               // Call onFileStart for each file in the response
-              data.files.forEach(file => {
-                onFileStart({
-                  ...file,
-                  uploadComplete: true
-                });
+              data.files.forEach(fileData => {
+                if (onFileStart) {
+                  onFileStart({
+                    id: fileData.id,
+                    filename: fileData.filename,
+                    size: fileData.size,
+                    totalPieces: fileData.totalPieces,
+                    pieceSize: fileData.pieceSize,
+                    uploadComplete: true
+                  });
+                }
               });
             }
             resolve(data);
           } catch (err) {
+            console.error('Error parsing upload response:', err, xhr.responseText);
             reject(new Error('Failed to parse response'));
           }
         } else {
@@ -148,8 +155,12 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
       const results = [];
 
       for (const uploadResult of uploadResults) {
-        if (uploadResult.success && uploadResult.result.success && uploadResult.result.files) {
-          results.push(...uploadResult.result.files);
+        if (uploadResult.success && uploadResult.result) {
+          if (uploadResult.result.success && uploadResult.result.files) {
+            results.push(...uploadResult.result.files);
+          } else {
+            console.warn('Upload result missing files:', uploadResult.result);
+          }
         } else if (!uploadResult.success) {
           console.error(`Failed to upload ${uploadResult.filename}:`, uploadResult.error);
           if (uploadResults.length === 1) {
@@ -159,9 +170,12 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
         }
       }
 
+      console.log('Upload results:', results);
       // Call onSuccess with all results (files should already be in list via onFileStart)
       if (results.length > 0) {
         onSuccess(results);
+      } else {
+        console.warn('No files in upload results!');
       }
       
       // Clear progress after a delay
