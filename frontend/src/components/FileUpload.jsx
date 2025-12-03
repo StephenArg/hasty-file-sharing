@@ -79,11 +79,15 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
               };
               return updated;
             });
-            // Notify that file is available (even if still processing)
+            // Notify that file upload completed and is available (even if still processing)
             if (data.success && data.files && data.files.length > 0 && onFileStart) {
-              // Call onFileStart for each file in the response
+              // Call onFileStart for each file in the response to update the temp entry
               data.files.forEach(file => {
-                onFileStart(file);
+                onFileStart({
+                  ...file,
+                  isUploading: false, // Upload complete, now processing
+                  uploadComplete: true
+                });
               });
             }
             resolve(data);
@@ -129,6 +133,22 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
       total: file.size,
       speed: ''
     })));
+
+    // Notify that files are starting to upload (add them to list immediately)
+    if (onFileStart) {
+      filesArray.forEach(file => {
+        // Create a temporary file entry that will be updated when upload completes
+        onFileStart({
+          id: `temp-${Date.now()}-${Math.random()}`, // Temporary ID
+          filename: file.name,
+          size: file.size,
+          totalPieces: 0, // Will be updated
+          pieceSize: 0,
+          isUploading: true,
+          tempFile: file
+        });
+      });
+    }
 
     try {
       // Upload files in parallel to see progress for all files simultaneously

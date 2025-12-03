@@ -116,25 +116,34 @@ const FileList = ({ files, onDelete }) => {
       <h2>Uploaded Files ({files.length})</h2>
       {files.map((file) => {
         const info = fileInfo[file.id];
-        const isComplete = !info || info.completePieces === info.totalPieces;
-        const completionPercent = info ? Math.round((info.completePieces / info.totalPieces) * 100) : 100;
+        const isUploading = file.isUploading === true;
+        const isComplete = !info || (info.completePieces === info.totalPieces && info.totalPieces > 0);
+        const completionPercent = info && info.totalPieces > 0 
+          ? Math.round((info.completePieces / info.totalPieces) * 100) 
+          : (isUploading ? 0 : 100);
 
         return (
           <div key={file.id} className="file-item">
             <div className="file-info">
               <div className="file-name">
                 {file.original_filename || file.filename}
-                {!isComplete && <span className="file-status-badge uploading">Uploading...</span>}
+                {isUploading && <span className="file-status-badge uploading">Uploading...</span>}
+                {!isUploading && !isComplete && info && <span className="file-status-badge uploading">Processing...</span>}
               </div>
               <div className="file-meta">
-                {formatFileSize(file.size)} • {file.total_pieces} pieces • {formatDate(file.created_at)}
-                {info && (
+                {formatFileSize(file.size)} • {info ? info.totalPieces : file.total_pieces || '?'} pieces • {formatDate(file.created_at)}
+                {isUploading && (
+                  <span className="file-completion">
+                    {' • '}Uploading... (pieces will be available soon)
+                  </span>
+                )}
+                {!isUploading && info && (
                   <span className="file-completion">
                     {' • '}{info.completePieces}/{info.totalPieces} pieces ready ({completionPercent}%)
                   </span>
                 )}
               </div>
-              {!isComplete && info && (
+              {!isUploading && !isComplete && info && (
                 <div className="file-upload-progress">
                   <div className="file-upload-progress-bar">
                     <div 
@@ -158,7 +167,7 @@ const FileList = ({ files, onDelete }) => {
                   {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
                 </button>
               </div>
-              {!isComplete && info && (
+              {!isUploading && !isComplete && info && info.completePieces > 0 && (
                 <div className="piece-downloads">
                   <details>
                     <summary>Download Available Pieces ({info.completePieces}/{info.totalPieces})</summary>
@@ -177,18 +186,27 @@ const FileList = ({ files, onDelete }) => {
                   </details>
                 </div>
               )}
+              {isUploading && (
+                <div className="piece-downloads">
+                  <p style={{ color: '#666', fontSize: '0.9em', marginTop: '10px' }}>
+                    ⏳ File is uploading. Download options will appear once upload completes and pieces are processed.
+                  </p>
+                </div>
+              )}
             </div>
             <div className="file-actions">
-              <ProgressiveDownload
-                fileId={file.id}
-                filename={file.original_filename || file.filename}
-                fileInfo={info}
-                onComplete={() => {
-                  // Refresh file info after download completes
-                  fetchFileInfo(file.id);
-                }}
-              />
-              {isComplete && (
+              {!isUploading && !file.id.startsWith('temp-') && (
+                <ProgressiveDownload
+                  fileId={file.id}
+                  filename={file.original_filename || file.filename}
+                  fileInfo={info}
+                  onComplete={() => {
+                    // Refresh file info after download completes
+                    fetchFileInfo(file.id);
+                  }}
+                />
+              )}
+              {!isUploading && isComplete && !file.id.startsWith('temp-') && (
                 <button
                   className="btn btn-small btn-success"
                   onClick={() => handleDownload(file.id, file.original_filename || file.filename)}
@@ -197,17 +215,19 @@ const FileList = ({ files, onDelete }) => {
                   ⬇️ Direct Download
                 </button>
               )}
-              <button
-                className="btn btn-small btn-danger"
-                onClick={() => {
-                  if (window.confirm('Are you sure you want to delete this file?')) {
-                    onDelete(file.id);
-                  }
-                }}
-                style={{ marginLeft: '5px' }}
-              >
-                🗑️ Delete
-              </button>
+              {!file.id.startsWith('temp-') && (
+                <button
+                  className="btn btn-small btn-danger"
+                  onClick={() => {
+                    if (window.confirm('Are you sure you want to delete this file?')) {
+                      onDelete(file.id);
+                    }
+                  }}
+                  style={{ marginLeft: '5px' }}
+                >
+                  🗑️ Delete
+                </button>
+              )}
             </div>
           </div>
         );

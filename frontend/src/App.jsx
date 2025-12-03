@@ -126,29 +126,95 @@ function App() {
         onLoadingChange={setLoading}
         storageStats={storageStats}
         onFileStart={(file) => {
-          // Add file to list immediately when upload completes (before processing)
-          console.log('File upload completed, adding to list:', file);
+          // Add or update file in list
           setFiles(prev => {
-            const existingIds = new Set(prev.map(f => f.id));
-            if (!existingIds.has(file.id)) {
-              const newFile = {
-                id: file.id,
-                filename: file.filename || file.original_filename,
-                original_filename: file.filename || file.original_filename,
-                size: file.size,
-                total_pieces: file.totalPieces || file.total_pieces,
-                piece_size: file.pieceSize || file.piece_size,
-                created_at: new Date().toISOString()
-              };
-              console.log('Adding new file:', newFile);
-              return [newFile, ...prev];
+            // If it's a temp file (uploading), check if we need to replace a temp entry
+            if (file.isUploading && file.tempFile) {
+              // Check if there's already a temp entry for this filename
+              const existingTempIndex = prev.findIndex(f => 
+                f.filename === file.filename && f.id && f.id.startsWith('temp-')
+              );
+              
+              if (existingTempIndex >= 0) {
+                // Update existing temp entry
+                const updated = [...prev];
+                updated[existingTempIndex] = {
+                  ...updated[existingTempIndex],
+                  size: file.size,
+                  isUploading: true
+                };
+                return updated;
+              } else {
+                // Add new temp entry
+                return [{
+                  id: file.id,
+                  filename: file.filename,
+                  original_filename: file.filename,
+                  size: file.size,
+                  total_pieces: 0,
+                  piece_size: 0,
+                  created_at: new Date().toISOString(),
+                  isUploading: true
+                }, ...prev];
+              }
+            } else if (file.uploadComplete) {
+              // Upload completed, update the temp entry or add new one
+              const existingIndex = prev.findIndex(f => 
+                (f.id === file.id) || 
+                (f.id && f.id.startsWith('temp-') && f.filename === file.filename)
+              );
+              
+              if (existingIndex >= 0) {
+                // Replace temp entry with real file data
+                const updated = [...prev];
+                updated[existingIndex] = {
+                  id: file.id,
+                  filename: file.filename,
+                  original_filename: file.filename,
+                  size: file.size,
+                  total_pieces: file.totalPieces || file.total_pieces || 0,
+                  piece_size: file.pieceSize || file.piece_size || 0,
+                  created_at: new Date().toISOString(),
+                  isUploading: false
+                };
+                return updated;
+              } else {
+                // Add new entry
+                return [{
+                  id: file.id,
+                  filename: file.filename,
+                  original_filename: file.filename,
+                  size: file.size,
+                  total_pieces: file.totalPieces || file.total_pieces || 0,
+                  piece_size: file.pieceSize || file.piece_size || 0,
+                  created_at: new Date().toISOString(),
+                  isUploading: false
+                }, ...prev];
+              }
+            } else {
+              // Regular file entry
+              const existingIds = new Set(prev.map(f => f.id));
+              if (!existingIds.has(file.id)) {
+                return [{
+                  id: file.id,
+                  filename: file.filename || file.original_filename,
+                  original_filename: file.filename || file.original_filename,
+                  size: file.size,
+                  total_pieces: file.totalPieces || file.total_pieces || 0,
+                  piece_size: file.pieceSize || file.piece_size || 0,
+                  created_at: new Date().toISOString()
+                }, ...prev];
+              }
             }
             return prev;
           });
-          // Refresh file info to start polling for piece completion
-          setTimeout(() => {
-            window.dispatchEvent(new CustomEvent('fileAdded', { detail: { fileId: file.id } }));
-          }, 100);
+          
+          // If upload is complete, fetch file info to start polling
+          if (file.uploadComplete && file.id && !file.id.startsWith('temp-')) {
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('fileAdded', { detail: { fileId: file.id } }));
+            }, 100);
+          }
         }}
       />
 
