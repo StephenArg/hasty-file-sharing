@@ -11,11 +11,21 @@ class DownloadManager {
       const db = await this.openDB();
       const tx = db.transaction(['downloads'], 'readonly');
       const store = tx.objectStore('downloads');
-      const allDownloads = await store.getAll();
       
-      allDownloads.forEach(download => {
-        this.downloads.set(download.fileId, download);
+      // getAll() returns a promise, need to await it
+      const request = store.getAll();
+      const allDownloads = await new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
       });
+      
+      if (Array.isArray(allDownloads)) {
+        allDownloads.forEach(download => {
+          if (download && download.fileId) {
+            this.downloads.set(download.fileId, download);
+          }
+        });
+      }
     } catch (err) {
       console.error('Error loading downloads:', err);
     }
@@ -78,8 +88,18 @@ class DownloadManager {
       const tx = db.transaction(['chunks'], 'readonly');
       const store = tx.objectStore('chunks');
       const index = store.index('fileId');
-      const chunks = await index.getAll(fileId);
-      return chunks.map(c => c.pieceIndex).sort((a, b) => a - b);
+      
+      // Use request pattern for getAll
+      const request = index.getAll(fileId);
+      const chunks = await new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+      
+      if (Array.isArray(chunks)) {
+        return chunks.map(c => c.pieceIndex).sort((a, b) => a - b);
+      }
+      return [];
     } catch (err) {
       console.error('Error getting chunks:', err);
       return [];
@@ -327,9 +347,18 @@ class DownloadManager {
       const tx = db.transaction(['chunks'], 'readonly');
       const store = tx.objectStore('chunks');
       const index = store.index('fileId');
-      const chunks = await index.getAll(fileId);
+      
+      // Use request pattern for getAll
+      const request = index.getAll(fileId);
+      let chunks = await new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
       
       // Sort chunks by piece index
+      if (!Array.isArray(chunks)) {
+        chunks = [];
+      }
       chunks.sort((a, b) => a.pieceIndex - b.pieceIndex);
       
       // Check if we have file handles (File System Access API)
@@ -454,10 +483,17 @@ class DownloadManager {
         const tx = db.transaction(['chunks'], 'readwrite');
         const store = tx.objectStore('chunks');
         const index = store.index('fileId');
-        const chunks = await index.getAll(fileId);
         
-        for (const chunk of chunks) {
-          await store.delete([fileId, chunk.pieceIndex]);
+        const request = index.getAll(fileId);
+        const chunks = await new Promise((resolve, reject) => {
+          request.onsuccess = () => resolve(request.result || []);
+          request.onerror = () => reject(request.error);
+        });
+        
+        if (Array.isArray(chunks)) {
+          for (const chunk of chunks) {
+            await store.delete([fileId, chunk.pieceIndex]);
+          }
         }
       } catch (err) {
         console.error('Error deleting chunks:', err);
