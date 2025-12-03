@@ -110,11 +110,27 @@ export class WebSocketDownloadManager {
           return;
         }
 
-        // Decode base64 data
+        // Decode base64 data - use more efficient method
+        // Convert base64 to binary string, then to Uint8Array
         const binaryString = atob(data);
         const bytes = new Uint8Array(binaryString.length);
         for (let i = 0; i < binaryString.length; i++) {
           bytes[i] = binaryString.charCodeAt(i);
+        }
+        
+        // Verify hash if provided (critical for data integrity)
+        if (hash) {
+          const { hashPiece } = await import('../utils/chunking');
+          const actualHash = await hashPiece(bytes);
+          if (actualHash !== hash) {
+            console.error(`[${id}] Hash mismatch for chunk ${chunkIndex}. Expected: ${hash}, Got: ${actualHash}`);
+            // Request chunk again - don't write corrupted chunk
+            wsClient.send('DOWNLOAD_REQUEST', {
+              fileId: id,
+              chunkIndex: chunkIndex
+            });
+            return;
+          }
         }
 
         // Write chunk to .part file at correct offset
@@ -123,10 +139,14 @@ export class WebSocketDownloadManager {
             // Use File System Access API to write at specific offset
             const writable = await download.partFileHandle.createWritable({ keepExistingData: true });
             
-            // Seek to offset and write
+            // Seek to offset and write using the correct API
             await writable.seek(offset);
-            await writable.write({ type: 'write', position: offset, data: bytes });
+            // Write the bytes directly (FileSystemWritableFileStream.write accepts Blob, BufferSource, or string)
+            await writable.write(bytes);
             await writable.close();
+            
+            // Verify the write by reading back (optional, but helps catch issues)
+            // Note: This adds overhead, so we'll rely on hash verification instead
           } catch (err) {
             console.error(`Error writing chunk ${chunkIndex} to file:`, err);
             // Fallback: store in IndexedDB

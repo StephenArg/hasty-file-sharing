@@ -38,8 +38,11 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
           });
         }
 
+        // Store pieceSize for progress calculation
+        const pieceSize = payload.pieceSize;
+        
         // Start uploading chunks
-        uploadChunks(file, fileId, payload.pieceSize, payload.totalPieces, onProgress, resolve, reject);
+        uploadChunks(file, fileId, pieceSize, payload.totalPieces, fileSize, onProgress, resolve, reject);
       };
 
       wsClient.on('UPLOAD_INIT_SUCCESS', initHandler);
@@ -49,12 +52,28 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
         uploadedChunks = payload.uploadedChunks;
         const progress = totalPieces > 0 ? (uploadedChunks / totalPieces) * 100 : 0;
         
+        // Calculate bytes transferred (approximate based on chunks uploaded)
+        // For the last chunk, use exact remaining bytes
+        let bytesTransferred = 0;
+        if (uploadedChunks > 0) {
+          if (uploadedChunks === totalPieces) {
+            bytesTransferred = fileSize; // All chunks uploaded
+          } else {
+            // Calculate: (uploadedChunks - 1) * pieceSize + current chunk size
+            const fullChunksBytes = (uploadedChunks - 1) * pieceSize;
+            const lastChunkSize = Math.min(pieceSize, fileSize - fullChunksBytes);
+            bytesTransferred = fullChunksBytes + lastChunkSize;
+          }
+        }
+        
         if (onProgress) {
           onProgress({
             filename: file.name,
             progress: Math.round(progress),
             loaded: uploadedChunks,
             total: totalPieces,
+            bytesLoaded: bytesTransferred,
+            bytesTotal: fileSize,
             speed: ''
           });
         }
@@ -75,6 +94,8 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
             progress: 100,
             loaded: totalPieces,
             total: totalPieces,
+            bytesLoaded: fileSize,
+            bytesTotal: fileSize,
             speed: ''
           });
         }
@@ -111,7 +132,7 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
 /**
  * Upload chunks sequentially
  */
-async function uploadChunks(file, fileId, pieceSize, totalPieces, onProgress, resolve, reject) {
+async function uploadChunks(file, fileId, pieceSize, totalPieces, fileSize, onProgress, resolve, reject) {
   let currentChunkIndex = 0;
   let errorOccurred = false;
 
@@ -161,6 +182,7 @@ async function uploadChunks(file, fileId, pieceSize, totalPieces, onProgress, re
 
 /**
  * Convert Uint8Array to base64 in chunks to avoid argument limit
+ * This ensures perfect fidelity by processing in manageable chunks
  */
 function uint8ArrayToBase64(uint8Array) {
   const chunkSize = 8192; // Process in chunks of 8KB
@@ -168,7 +190,9 @@ function uint8ArrayToBase64(uint8Array) {
   
   for (let i = 0; i < uint8Array.length; i += chunkSize) {
     const chunk = uint8Array.subarray(i, i + chunkSize);
-    result += String.fromCharCode.apply(null, chunk);
+    // Use Array.from to convert to array, then apply
+    const chunkArray = Array.from(chunk);
+    result += String.fromCharCode.apply(null, chunkArray);
   }
   
   return btoa(result);

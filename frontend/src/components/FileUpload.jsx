@@ -33,6 +33,8 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
               progress: progress.progress,
               loaded: progress.loaded,
               total: progress.total,
+              bytesLoaded: progress.bytesLoaded || 0,
+              bytesTotal: progress.bytesTotal || file.size,
               speed: progress.speed || '',
               timestamp: Date.now()
             };
@@ -84,7 +86,9 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
       filename: file.name,
       progress: 0,
       loaded: 0,
-      total: file.size,
+      total: 0, // Will be set to total chunks
+      bytesLoaded: 0,
+      bytesTotal: file.size,
       speed: 'Initializing...'
     }));
     setUploadProgress(initialProgress);
@@ -288,7 +292,12 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
                 ></div>
               </div>
               <div className="upload-progress-details">
-                <span>{upload.loaded} / {upload.total} chunks</span>
+                <span>
+                  {upload.loaded} / {upload.total} chunks
+                  {upload.bytesLoaded !== undefined && upload.bytesTotal !== undefined && (
+                    <span> • {formatFileSize(upload.bytesLoaded)} / {formatFileSize(upload.bytesTotal)}</span>
+                  )}
+                </span>
                 {upload.speed && <span className="upload-speed">{upload.speed}</span>}
               </div>
             </div>

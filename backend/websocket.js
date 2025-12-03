@@ -197,9 +197,16 @@ async function handleUploadChunk(ws, payload) {
     // Use fs.promises for proper async file writing
     const fd = await require('fs').promises.open(upload.filePath, 'r+');
     try {
-      // FileHandle.write() signature: buffer, offset?, length?, position?
+      // FileHandle.write() signature: (buffer, offset?, length?, position?)
       // We want to write chunkData at position 'offset'
-      await fd.write(chunkData, 0, chunkData.length, offset);
+      // offset=0 means start from beginning of buffer, length=chunkData.length, position=file offset
+      const result = await fd.write(chunkData, 0, chunkData.length, offset);
+      
+      // Verify bytes written
+      if (result.bytesWritten !== chunkData.length) {
+        throw new Error(`Only wrote ${result.bytesWritten} of ${chunkData.length} bytes`);
+      }
+      
       await fd.sync(); // Ensure data is written to disk
     } finally {
       await fd.close();
@@ -334,7 +341,14 @@ async function handleDownloadRequest(ws, payload) {
     const fd = await require('fs').promises.open(file.file_path, 'r');
     try {
       const buffer = Buffer.alloc(piece.size);
-      await fd.read(buffer, 0, piece.size, piece.offset);
+      const result = await fd.read(buffer, 0, piece.size, piece.offset);
+      
+      // Verify bytes read
+      if (result.bytesRead !== piece.size) {
+        sendError(ws, 'READ_ERROR', `Only read ${result.bytesRead} of ${piece.size} bytes`);
+        await fd.close();
+        return;
+      }
 
       // Send chunk
       ws.send(JSON.stringify({
@@ -442,11 +456,17 @@ async function notifyDownloaders(fileId, chunkIndex) {
   const piece = pieces.find(p => p.piece_index === chunkIndex && p.is_complete === 1);
   if (!piece) return;
 
-  // Read and send chunk to all active downloaders
-  const fd = await require('fs').promises.open(file.file_path, 'r');
-  try {
-    const buffer = Buffer.alloc(piece.size);
-    await fd.read(buffer, 0, piece.size, piece.offset);
+    // Read and send chunk to all active downloaders
+    const fd = await require('fs').promises.open(file.file_path, 'r');
+    try {
+      const buffer = Buffer.alloc(piece.size);
+      const result = await fd.read(buffer, 0, piece.size, piece.offset);
+      
+      // Verify bytes read
+      if (result.bytesRead !== piece.size) {
+        console.error(`[${fileId}] Only read ${result.bytesRead} of ${piece.size} bytes for chunk ${chunkIndex}`);
+        return;
+      }
 
     const message = JSON.stringify({
       type: 'DOWNLOAD_CHUNK',
