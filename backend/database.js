@@ -144,6 +144,20 @@ function updatePieceComplete(fileId, pieceIndex, isComplete) {
   });
 }
 
+function updatePieceHash(fileId, pieceIndex, hash) {
+  return new Promise((resolve, reject) => {
+    const database = getDB();
+    database.run(
+      `UPDATE pieces SET hash = ? WHERE file_id = ? AND piece_index = ?`,
+      [hash, fileId, pieceIndex],
+      function(err) {
+        if (err) reject(err);
+        else resolve(this.changes);
+      }
+    );
+  });
+}
+
 function getAllFiles() {
   return new Promise((resolve, reject) => {
     const database = getDB();
@@ -206,6 +220,7 @@ module.exports = {
   getFileById,
   getPiecesByFileId,
   updatePieceComplete,
+  updatePieceHash,
   getAllFiles,
   deleteFile,
   getTotalStorageUsed,

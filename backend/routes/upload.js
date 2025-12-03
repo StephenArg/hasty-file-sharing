@@ -107,10 +107,14 @@ router.post('/files', upload.array('files'), async (req, res) => {
       // Move file to final location
       await fs.rename(file.path, finalPath);
       
-      // Process file into pieces
-      const { pieces, pieceSize, totalPieces, fileSize } = await processFile(finalPath);
+      // Get file size and determine piece size
+      const fileStats = await fs.stat(finalPath);
+      const fileSize = fileStats.size;
+      const { getPieceSize } = require('../utils/chunking');
+      const pieceSize = getPieceSize(fileSize);
+      const totalPieces = Math.ceil(fileSize / pieceSize);
       
-      // Save to database
+      // Create file entry immediately (before processing)
       await db.createFile({
         id: fileId,
         filename: finalFilename,
@@ -122,18 +126,25 @@ router.post('/files', upload.array('files'), async (req, res) => {
         filePath: finalPath
       });
       
-      // Save pieces to database
-      const dbPieces = pieces.map(piece => ({
-        fileId,
-        pieceIndex: piece.pieceIndex,
-        hash: piece.hash,
-        size: piece.size,
-        offset: piece.offset,
-        isComplete: 1
-      }));
-      
+      // Create piece entries (initially incomplete)
+      const dbPieces = [];
+      for (let i = 0; i < totalPieces; i++) {
+        const offset = i * pieceSize;
+        const remainingBytes = fileSize - offset;
+        const currentPieceSize = Math.min(pieceSize, remainingBytes);
+        
+        dbPieces.push({
+          fileId,
+          pieceIndex: i,
+          hash: '', // Will be set during processing
+          size: currentPieceSize,
+          offset,
+          isComplete: 0
+        });
+      }
       await db.createPieces(dbPieces);
       
+      // Return immediately so file appears in list
       results.push({
         id: fileId,
         filename: file.originalname,
@@ -141,6 +152,21 @@ router.post('/files', upload.array('files'), async (req, res) => {
         url: `/api/download/${fileId}`,
         pieceSize,
         totalPieces
+      });
+      
+      // Process file into pieces in the background (async, don't await)
+      processFile(finalPath).then(({ pieces }) => {
+        // Update pieces with hashes and mark as complete
+        Promise.all(pieces.map(piece => 
+          Promise.all([
+            db.updatePieceHash(fileId, piece.pieceIndex, piece.hash),
+            db.updatePieceComplete(fileId, piece.pieceIndex, true)
+          ])
+        )).catch(err => {
+          console.error(`Error updating pieces for ${fileId}:`, err);
+        });
+      }).catch(err => {
+        console.error(`Error processing file ${fileId}:`, err);
       });
     }
     

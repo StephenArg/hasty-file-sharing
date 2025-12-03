@@ -1,7 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import JSZip from 'jszip';
 
-const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress }) => {
+const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onFileStart }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [uploadProgress, setUploadProgress] = useState([]);
   const fileInputRef = useRef(null);
@@ -79,6 +79,10 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress }) =
               };
               return updated;
             });
+            // Notify that file is available (even if still processing)
+            if (data.success && data.files && data.files.length > 0 && onFileStart) {
+              onFileStart(data.files[0]);
+            }
             resolve(data);
           } catch (err) {
             reject(new Error('Failed to parse response'));

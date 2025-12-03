@@ -36,6 +36,23 @@ function App() {
   const handleUploadSuccess = (uploadedFiles) => {
     setSuccess(`Successfully uploaded ${uploadedFiles.length} file(s)!`);
     setError(null);
+    // Immediately add files to list (they're being processed in background)
+    setFiles(prev => {
+      const newFiles = uploadedFiles.map(f => ({
+        id: f.id,
+        filename: f.filename,
+        original_filename: f.filename,
+        size: f.size,
+        total_pieces: f.totalPieces,
+        piece_size: f.pieceSize,
+        created_at: new Date().toISOString()
+      }));
+      // Merge with existing, avoiding duplicates
+      const existingIds = new Set(prev.map(f => f.id));
+      const uniqueNew = newFiles.filter(f => !existingIds.has(f.id));
+      return [...uniqueNew, ...prev];
+    });
+    // Also fetch to get any updates
     fetchFiles();
     // Refresh storage stats after upload
     setTimeout(() => {
@@ -108,6 +125,24 @@ function App() {
         onError={handleUploadError}
         onLoadingChange={setLoading}
         storageStats={storageStats}
+        onFileStart={(file) => {
+          // Add file to list immediately when upload starts
+          setFiles(prev => {
+            const existingIds = new Set(prev.map(f => f.id));
+            if (!existingIds.has(file.id)) {
+              return [{
+                id: file.id,
+                filename: file.filename,
+                original_filename: file.filename,
+                size: file.size,
+                total_pieces: file.totalPieces,
+                piece_size: file.pieceSize,
+                created_at: new Date().toISOString()
+              }, ...prev];
+            }
+            return prev;
+          });
+        }}
       />
 
       <FileList files={files} onDelete={handleDelete} />
