@@ -135,19 +135,35 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
     onLoadingChange(true);
     const filesArray = Array.from(filesToUpload);
     
-    // Initialize progress tracking
-    setUploadProgress(filesArray.map(file => ({
+    // Initialize progress tracking - set up progress state for all files
+    const initialProgress = filesArray.map(file => ({
       filename: file.name,
       progress: 0,
       loaded: 0,
       total: file.size,
-      speed: ''
-    })));
+      speed: 'Initializing...'
+    }));
+    setUploadProgress(initialProgress);
 
     try {
       // First, initialize all file entries in the backend (creates file entries immediately)
-      const initPromises = filesArray.map(async (file, i) => {
+      // This is fast, so we do it sequentially to avoid race conditions
+      const fileIdMap = new Map();
+      for (let i = 0; i < filesArray.length; i++) {
+        const file = filesArray[i];
         try {
+          // Update progress to show initialization
+          setUploadProgress(prev => {
+            const updated = [...prev];
+            if (updated[i]) {
+              updated[i] = {
+                ...updated[i],
+                speed: 'Initializing...'
+              };
+            }
+            return updated;
+          });
+          
           const mimeType = file.type || 'application/octet-stream';
           const response = await fetch('/api/upload/chunk/init', {
             method: 'POST',
@@ -161,6 +177,7 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
           
           if (response.ok) {
             const data = await response.json();
+            fileIdMap.set(file.name, data.fileId);
             // Notify that file entry was created - file is now available for download
             if (onFileStart && data.success) {
               onFileStart({
@@ -172,25 +189,25 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
                 uploadComplete: false // Still uploading
               });
             }
-            return { success: true, fileId: data.fileId, file, index: i, initData: data };
+            
+            // Update progress to show ready for upload
+            setUploadProgress(prev => {
+              const updated = [...prev];
+              if (updated[i]) {
+                updated[i] = {
+                  ...updated[i],
+                  speed: 'Starting upload...'
+                };
+              }
+              return updated;
+            });
           } else {
-            throw new Error('Failed to initialize file');
+            console.error(`Failed to initialize ${file.name}`);
           }
         } catch (err) {
           console.error(`Failed to initialize ${file.name}:`, err);
-          return { success: false, error: err, file, index: i };
         }
-      });
-
-      const initResults = await Promise.all(initPromises);
-      
-      // Create a map of filename to fileId for the upload
-      const fileIdMap = new Map();
-      initResults.forEach(initResult => {
-        if (initResult.success && initResult.fileId) {
-          fileIdMap.set(initResult.file.name, initResult.fileId);
-        }
-      });
+      }
       
       // Now upload files using the regular endpoint (which will update the existing entries)
       // Upload files in parallel to see progress for all files simultaneously

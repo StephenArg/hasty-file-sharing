@@ -166,7 +166,7 @@ const FileList = ({ files, onDelete }) => {
                   {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
                 </button>
               </div>
-              {!isUploading && !isComplete && info && info.completePieces > 0 && (
+              {!isComplete && info && info.completePieces > 0 && (
                 <div className="piece-downloads">
                   <details>
                     <summary>Download Available Pieces ({info.completePieces}/{info.totalPieces})</summary>
