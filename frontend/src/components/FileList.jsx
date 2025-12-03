@@ -32,7 +32,15 @@ const FileList = ({ files, onDelete }) => {
 
   const fetchFileInfo = async (fileId) => {
     try {
-      const response = await fetch(`/api/download/${fileId}/info`);
+      const response = await fetch(`/api/download/${fileId}/info`, {
+        credentials: 'include'
+      });
+      
+      if (response.status === 401) {
+        // Not authenticated, skip
+        return;
+      }
+      
       const data = await response.json();
       setFileInfo(prev => ({
         ...prev,
@@ -197,7 +205,7 @@ const FileList = ({ files, onDelete }) => {
                   {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
                 </button>
                 <div className="file-actions">
-                  {(!isComplete && file.id && !file.id.startsWith('temp-')) && (
+                  {isDownloading[file.id] || (!isComplete && file.id && !file.id.startsWith('temp-')) && (
                     <ProgressiveDownload
                       downloadStatus={downloadStatus[file.id] || null}
                       setDownloadStatus={(status) => {

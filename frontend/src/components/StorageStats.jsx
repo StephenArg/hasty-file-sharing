@@ -14,7 +14,16 @@ const StorageStats = ({ onStorageUpdate }) => {
 
   const fetchStats = async () => {
     try {
-      const response = await fetch('/api/storage');
+      const response = await fetch('/api/storage', {
+        credentials: 'include'
+      });
+      
+      if (response.status === 401) {
+        // Not authenticated, don't show stats
+        setLoading(false);
+        return;
+      }
+      
       const data = await response.json();
       setStats(data);
       setLoading(false);

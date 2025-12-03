@@ -1,8 +1,6 @@
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+  hasty-file-send:
+    image: your-dockerhub-username/hasty-file-send:latest
     container_name: hasty-file-send
     ports:
       - "8087:3000"
@@ -23,4 +21,3 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-

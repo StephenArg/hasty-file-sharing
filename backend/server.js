@@ -1,13 +1,16 @@
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const path = require('path');
 const fs = require('fs').promises;
 const db = require('./database');
 const uploadRoutes = require('./routes/upload');
 const downloadRoutes = require('./routes/download');
 const fileRoutes = require('./routes/files');
+const authRoutes = require('./routes/auth');
 const { initializeWebSocket } = require('./websocket');
+const { requireAuth, isAuthRequired } = require('./middleware/auth');
 
 const app = express();
 const server = http.createServer(app);
@@ -48,25 +51,33 @@ async function ensureDirectories() {
 }
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: true,
+  credentials: true
+}));
+app.use(cookieParser());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Auth routes (public)
+app.use('/api/auth', authRoutes);
+
 // Serve static files (frontend)
+// Note: Static files are served without auth check - the frontend will handle showing login
 app.use(express.static(path.join(__dirname, '../public')));
 
-// API routes
-app.use('/api/upload', uploadRoutes);
-app.use('/api/download', downloadRoutes);
-app.use('/api/files', fileRoutes);
+// Protected API routes
+app.use('/api/upload', requireAuth, uploadRoutes);
+app.use('/api/download', requireAuth, downloadRoutes);
+app.use('/api/files', requireAuth, fileRoutes);
 
-// Health check
+// Health check (public)
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Storage stats endpoint
-app.get('/api/storage', async (req, res) => {
+// Storage stats endpoint (protected)
+app.get('/api/storage', requireAuth, async (req, res) => {
   try {
     const totalUsed = await db.getTotalStorageUsed();
     const fileCount = await db.getFileCount();

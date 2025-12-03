@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import FileUpload from './components/FileUpload';
 import FileList from './components/FileList';
 import StorageStats from './components/StorageStats';
+import Login from './components/Login';
 import './App.css';
 
 function App() {
@@ -10,6 +11,8 @@ function App() {
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
   const [storageStats, setStorageStats] = useState(null);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
 
   const formatBytes = (bytes) => {
     if (bytes === 0) return '0 Bytes';
@@ -21,7 +24,19 @@ function App() {
 
   const fetchFiles = useCallback(async (forceRefresh = false) => {
     try {
-      const response = await fetch('/api/files');
+      const response = await fetch('/api/files', {
+        credentials: 'include'
+      });
+      
+      // Check if authentication is required
+      if (response.status === 401) {
+        const data = await response.json();
+        if (data.requiresAuth) {
+          setAuthenticated(false);
+          return;
+        }
+      }
+      
       const data = await response.json();
       console.log('Fetched files from API:', data.files);
       
@@ -52,11 +67,49 @@ function App() {
     }
   }, []);
 
+  // Check authentication status on mount
   useEffect(() => {
-    // Only fetch files on initial load, not on every render
+    checkAuthStatus();
+  }, []);
+
+  const checkAuthStatus = async () => {
+    try {
+      const response = await fetch('/api/auth/status', {
+        credentials: 'include'
+      });
+      const data = await response.json();
+      
+      if (!data.requiresAuth) {
+        // Password not required
+        setAuthenticated(true);
+        setCheckingAuth(false);
+        fetchFiles();
+        return;
+      }
+      
+      if (data.authenticated) {
+        setAuthenticated(true);
+        fetchFiles();
+      }
+      setCheckingAuth(false);
+    } catch (err) {
+      console.error('Error checking auth status:', err);
+      setCheckingAuth(false);
+    }
+  };
+
+  const handleLogin = () => {
+    setAuthenticated(true);
     fetchFiles();
+  };
+
+  useEffect(() => {
+    // Only fetch files if authenticated
+    if (authenticated) {
+      fetchFiles();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Empty deps - only run once on mount
+  }, [authenticated]); // Fetch files when authenticated
 
   const handleUploadSuccess = (uploadedFiles) => {
     console.log('Upload success, files:', uploadedFiles);
@@ -115,7 +168,8 @@ function App() {
   const handleDelete = async (fileId) => {
     try {
       const response = await fetch(`/api/files/${fileId}`, {
-        method: 'DELETE'
+        method: 'DELETE',
+        credentials: 'include'
       });
       
       if (response.ok) {
@@ -140,10 +194,15 @@ function App() {
     }
   };
 
+  // Show login page if checking auth or not authenticated
+  if (checkingAuth || !authenticated) {
+    return <Login onLogin={handleLogin} />;
+  }
+
   return (
     <div className="app">
       <h1>🚀 Hasty File Send</h1>
-      <p className="subtitle">Self-hosted file sharing with torrent-like chunking</p>
+      <p className="subtitle">Self-hosted file sharing with torrent-like chunking. Works best with Chrome.</p>
 
       <StorageStats onStorageUpdate={handleStorageUpdate} />
 

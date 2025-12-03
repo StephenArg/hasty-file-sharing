@@ -146,6 +146,20 @@ export async function uploadFileViaWebSocket(file, onProgress, onFileStart) {
           return; // Not our file's error
         }
         
+        if (payload.errorType === 'AUTH_REQUIRED') {
+          // Authentication required - trigger login
+          if (!isResolved) {
+            isResolved = true;
+            // Clean up handlers
+            wsClient.off('UPLOAD_INIT_SUCCESS', initHandler);
+            wsClient.off('UPLOAD_CHUNK_SUCCESS', chunkHandler);
+            wsClient.off('UPLOAD_COMPLETE', completeHandler);
+            wsClient.off('ERROR', errorHandler);
+            reject(new Error('Authentication required. Please log in.'));
+          }
+          return;
+        }
+        
         if (payload.errorType === 'UPLOAD_INIT_ERROR' || 
             payload.errorType === 'UPLOAD_CHUNK_ERROR' ||
             payload.errorType === 'STORAGE_LIMIT_EXCEEDED' ||

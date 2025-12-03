@@ -5,6 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 const mimeTypes = require('mime-types');
 const db = require('./database');
 const { getPieceSize, hashPiece } = require('./utils/chunking');
+const { verifyToken, isAuthRequired } = require('./middleware/auth');
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../uploads');
 
@@ -20,9 +21,36 @@ function initializeWebSocket(server) {
 
   wss.on('connection', (ws, req) => {
     console.log('WebSocket client connected');
+    
+    // Extract token from cookies or query string
+    let token = null;
+    if (req.headers.cookie) {
+      const cookies = req.headers.cookie.split(';').reduce((acc, cookie) => {
+        const [key, value] = cookie.trim().split('=');
+        acc[key] = value;
+        return acc;
+      }, {});
+      token = cookies.authToken;
+    }
+    
+    // Check authentication if required
+    let authenticated = !isAuthRequired();
+    if (isAuthRequired() && token) {
+      const decoded = verifyToken(token);
+      authenticated = decoded !== null;
+    }
+    
+    // Store auth status on connection
+    ws.authenticated = authenticated;
 
     ws.on('message', async (data) => {
       try {
+        // Check authentication for protected operations
+        if (isAuthRequired() && !ws.authenticated) {
+          sendError(ws, 'AUTH_REQUIRED', 'Authentication required');
+          return;
+        }
+        
         const message = JSON.parse(data.toString());
         await handleMessage(ws, message);
       } catch (err) {
