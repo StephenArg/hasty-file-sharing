@@ -19,28 +19,34 @@ function App() {
     return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
   };
 
-  const fetchFiles = useCallback(async () => {
+  const fetchFiles = useCallback(async (forceRefresh = false) => {
     try {
       const response = await fetch('/api/files');
       const data = await response.json();
       console.log('Fetched files from API:', data.files);
-      // Merge with existing files instead of replacing (to preserve any that were just added)
-      setFiles(prev => {
-        const serverFiles = data.files || [];
-        const existingIds = new Set(prev.map(f => f.id));
-        const newServerFiles = serverFiles.filter(f => !existingIds.has(f.id));
-        // If we have new files from server, add them; otherwise keep existing
-        if (newServerFiles.length > 0) {
-          return [...newServerFiles, ...prev];
-        }
-        // If server has files we don't have, use server data (more authoritative)
-        const serverIds = new Set(serverFiles.map(f => f.id));
-        const missingFromServer = prev.filter(f => !serverIds.has(f.id));
-        if (missingFromServer.length === 0 && serverFiles.length > 0) {
-          return serverFiles;
-        }
-        return prev;
-      });
+      
+      if (forceRefresh) {
+        // Force refresh: use server data as source of truth (handles deletions)
+        setFiles(data.files || []);
+      } else {
+        // Merge with existing files instead of replacing (to preserve any that were just added)
+        setFiles(prev => {
+          const serverFiles = data.files || [];
+          const existingIds = new Set(prev.map(f => f.id));
+          const newServerFiles = serverFiles.filter(f => !existingIds.has(f.id));
+          // If we have new files from server, add them; otherwise keep existing
+          if (newServerFiles.length > 0) {
+            return [...newServerFiles, ...prev];
+          }
+          // If server has files we don't have, use server data (more authoritative)
+          const serverIds = new Set(serverFiles.map(f => f.id));
+          const missingFromServer = prev.filter(f => !serverIds.has(f.id));
+          if (missingFromServer.length === 0 && serverFiles.length > 0) {
+            return serverFiles;
+          }
+          return prev;
+        });
+      }
     } catch (err) {
       console.error('Error fetching files:', err);
     }
@@ -114,7 +120,10 @@ function App() {
       
       if (response.ok) {
         setSuccess('File deleted successfully');
-        fetchFiles();
+        // Force refresh to ensure deleted file is removed from list
+        fetchFiles(true);
+        // Also remove from local state immediately for better UX
+        setFiles(prev => prev.filter(f => f.id !== fileId));
         // Refresh storage stats after deletion
         setTimeout(() => {
           window.dispatchEvent(new Event('storageRefresh'));

@@ -4,8 +4,8 @@ import ProgressiveDownload from './ProgressiveDownload';
 const FileList = ({ files, onDelete }) => {
   const [copiedId, setCopiedId] = useState(null);
   const [fileInfo, setFileInfo] = useState({});
-  const [downloadStatus, setDownloadStatus] = useState(null);
-  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState({}); // Map of fileId -> status
+  const [isDownloading, setIsDownloading] = useState({}); // Map of fileId -> boolean
 
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 Bytes';
@@ -169,12 +169,22 @@ const FileList = ({ files, onDelete }) => {
                   {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
                 </button>
                 <div className="file-actions">
-                  {(isDownloading || (!isComplete && file.id && !file.id.startsWith('temp-'))) && (
+                  {(!isComplete && file.id && !file.id.startsWith('temp-')) && (
                     <ProgressiveDownload
-                      downloadStatus={downloadStatus}
-                      setDownloadStatus={setDownloadStatus}
-                      isDownloading={isDownloading}
-                      setIsDownloading={setIsDownloading}
+                      downloadStatus={downloadStatus[file.id] || null}
+                      setDownloadStatus={(status) => {
+                        setDownloadStatus(prev => ({
+                          ...prev,
+                          [file.id]: status
+                        }));
+                      }}
+                      isDownloading={isDownloading[file.id] || false}
+                      setIsDownloading={(downloading) => {
+                        setIsDownloading(prev => ({
+                          ...prev,
+                          [file.id]: downloading
+                        }));
+                      }}
                       fileId={file.id}
                       filename={file.original_filename || file.filename}
                       fileInfo={info}
@@ -184,7 +194,7 @@ const FileList = ({ files, onDelete }) => {
                       }}
                     />
                   )}
-                  {isComplete && file.id && !file.id.startsWith('temp-') && !isDownloading && (
+                  {isComplete && file.id && !file.id.startsWith('temp-') && !isDownloading[file.id] && (
                     <button
                       className="btn btn-small btn-success"
                       onClick={() => handleDownload(file.id, file.original_filename || file.filename)}
@@ -193,7 +203,7 @@ const FileList = ({ files, onDelete }) => {
                       ⬇️ Direct Download
                     </button>
                   )}
-                  {file.id && !file.id.startsWith('temp-') && !isDownloading && (
+                  {file.id && !file.id.startsWith('temp-') && !isDownloading[file.id] && (
                     <button
                       className="btn btn-small btn-danger"
                       onClick={() => {
