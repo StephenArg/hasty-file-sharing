@@ -197,6 +197,8 @@ async function handleUploadChunk(ws, payload) {
     // Use fs.promises for proper async file writing
     const fd = await require('fs').promises.open(upload.filePath, 'r+');
     try {
+      // FileHandle.write() signature: buffer, offset?, length?, position?
+      // We want to write chunkData at position 'offset'
       await fd.write(chunkData, 0, chunkData.length, offset);
       await fd.sync(); // Ensure data is written to disk
     } finally {

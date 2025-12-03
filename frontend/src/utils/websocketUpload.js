@@ -130,8 +130,8 @@ async function uploadChunks(file, fileId, pieceSize, totalPieces, onProgress, re
       const arrayBuffer = await chunk.arrayBuffer();
       const uint8Array = new Uint8Array(arrayBuffer);
       
-      // Convert to base64
-      const base64Data = btoa(String.fromCharCode(...uint8Array));
+      // Convert to base64 in chunks to avoid "too many function arguments" error
+      const base64Data = uint8ArrayToBase64(uint8Array);
       
       // Calculate hash
       const hash = await hashPiece(uint8Array);
@@ -157,5 +157,20 @@ async function uploadChunks(file, fileId, pieceSize, totalPieces, onProgress, re
 
   // Start uploading chunks
   uploadNextChunk();
+}
+
+/**
+ * Convert Uint8Array to base64 in chunks to avoid argument limit
+ */
+function uint8ArrayToBase64(uint8Array) {
+  const chunkSize = 8192; // Process in chunks of 8KB
+  let result = '';
+  
+  for (let i = 0; i < uint8Array.length; i += chunkSize) {
+    const chunk = uint8Array.subarray(i, i + chunkSize);
+    result += String.fromCharCode.apply(null, chunk);
+  }
+  
+  return btoa(result);
 }
 
