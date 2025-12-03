@@ -240,10 +240,10 @@ class DownloadManager {
     }
 
     // Check if download is complete
-    if (download.downloadedPieces.length === fileInfo.totalPieces) {
+    if (download.downloadedPieces.length === fileInfo.totalPieces && fileInfo.totalPieces > 0) {
       await this.assembleFile(fileId, download, fileInfo);
     } else {
-      // Schedule next check
+      // Schedule next check for more pieces (even if file is still being processed)
       setTimeout(() => {
         this.checkForNewPieces(fileId, fileInfo, download, onProgress);
       }, 2000);

@@ -39,18 +39,40 @@ router.get('/:fileId', async (req, res) => {
         });
       }
       
-      // Read and send piece
-      const fd = await fs.open(file.file_path, 'r');
+      // Read and send piece - handle case where file might still be uploading
       try {
-        const buffer = Buffer.alloc(requestedPiece.size);
-        await fd.read(buffer, 0, requestedPiece.size, requestedPiece.offset);
-        
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Length', requestedPiece.size);
-        res.setHeader('Content-Range', `bytes ${requestedPiece.offset}-${requestedPiece.offset + requestedPiece.size - 1}/${file.size}`);
-        res.send(buffer);
-      } finally {
-        await fd.close();
+        const fd = await fs.open(file.file_path, 'r');
+        try {
+          const buffer = Buffer.alloc(requestedPiece.size);
+          const bytesRead = await fd.read(buffer, 0, requestedPiece.size, requestedPiece.offset);
+          
+          // If we read less than expected, pad with zeros or return partial
+          if (bytesRead.bytesRead < requestedPiece.size) {
+            const partialBuffer = buffer.slice(0, bytesRead.bytesRead);
+            res.setHeader('Content-Type', 'application/octet-stream');
+            res.setHeader('Content-Length', bytesRead.bytesRead);
+            res.setHeader('Content-Range', `bytes ${requestedPiece.offset}-${requestedPiece.offset + bytesRead.bytesRead - 1}/${file.size}`);
+            res.status(206); // Partial content
+            res.send(partialBuffer);
+          } else {
+            res.setHeader('Content-Type', 'application/octet-stream');
+            res.setHeader('Content-Length', requestedPiece.size);
+            res.setHeader('Content-Range', `bytes ${requestedPiece.offset}-${requestedPiece.offset + requestedPiece.size - 1}/${file.size}`);
+            res.send(buffer);
+          }
+        } finally {
+          await fd.close();
+        }
+      } catch (err) {
+        // File might not exist yet or be locked - return 206 to indicate piece not ready
+        if (err.code === 'ENOENT' || err.code === 'EBUSY') {
+          return res.status(206).json({ 
+            error: 'Piece not yet available',
+            pieceIndex,
+            isComplete: false
+          });
+        }
+        throw err;
       }
       
       return;

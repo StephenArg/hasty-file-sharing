@@ -116,34 +116,33 @@ const FileList = ({ files, onDelete }) => {
       <h2>Uploaded Files ({files.length})</h2>
       {files.map((file) => {
         const info = fileInfo[file.id];
-        const isUploading = file.isUploading === true;
-        const isComplete = !info || (info.completePieces === info.totalPieces && info.totalPieces > 0);
+        // File is complete if all pieces are processed (not just uploaded)
+        const isComplete = info && info.totalPieces > 0 && info.completePieces === info.totalPieces;
         const completionPercent = info && info.totalPieces > 0 
           ? Math.round((info.completePieces / info.totalPieces) * 100) 
-          : (isUploading ? 0 : 100);
+          : 0;
 
         return (
           <div key={file.id} className="file-item">
             <div className="file-info">
               <div className="file-name">
                 {file.original_filename || file.filename}
-                {isUploading && <span className="file-status-badge uploading">Uploading...</span>}
-                {!isUploading && !isComplete && info && <span className="file-status-badge uploading">Processing...</span>}
+                {!isComplete && info && <span className="file-status-badge uploading">Processing...</span>}
               </div>
               <div className="file-meta">
                 {formatFileSize(file.size)} • {info ? info.totalPieces : file.total_pieces || '?'} pieces • {formatDate(file.created_at)}
-                {isUploading && (
-                  <span className="file-completion">
-                    {' • '}Uploading... (pieces will be available soon)
-                  </span>
-                )}
-                {!isUploading && info && (
+                {info && (
                   <span className="file-completion">
                     {' • '}{info.completePieces}/{info.totalPieces} pieces ready ({completionPercent}%)
                   </span>
                 )}
+                {!info && (
+                  <span className="file-completion">
+                    {' • '}Processing pieces...
+                  </span>
+                )}
               </div>
-              {!isUploading && !isComplete && info && (
+              {!isComplete && info && info.completePieces > 0 && (
                 <div className="file-upload-progress">
                   <div className="file-upload-progress-bar">
                     <div 
@@ -186,16 +185,9 @@ const FileList = ({ files, onDelete }) => {
                   </details>
                 </div>
               )}
-              {isUploading && (
-                <div className="piece-downloads">
-                  <p style={{ color: '#666', fontSize: '0.9em', marginTop: '10px' }}>
-                    ⏳ File is uploading. Download options will appear once upload completes and pieces are processed.
-                  </p>
-                </div>
-              )}
             </div>
             <div className="file-actions">
-              {!isUploading && !file.id.startsWith('temp-') && (
+              {file.id && !file.id.startsWith('temp-') && (
                 <ProgressiveDownload
                   fileId={file.id}
                   filename={file.original_filename || file.filename}
@@ -206,7 +198,7 @@ const FileList = ({ files, onDelete }) => {
                   }}
                 />
               )}
-              {!isUploading && isComplete && !file.id.startsWith('temp-') && (
+              {isComplete && file.id && !file.id.startsWith('temp-') && (
                 <button
                   className="btn btn-small btn-success"
                   onClick={() => handleDownload(file.id, file.original_filename || file.filename)}
@@ -215,7 +207,7 @@ const FileList = ({ files, onDelete }) => {
                   ⬇️ Direct Download
                 </button>
               )}
-              {!file.id.startsWith('temp-') && (
+              {file.id && !file.id.startsWith('temp-') && (
                 <button
                   className="btn btn-small btn-danger"
                   onClick={() => {
