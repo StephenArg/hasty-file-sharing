@@ -169,7 +169,7 @@ const FileList = ({ files, onDelete }) => {
                   {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
                 </button>
                 <div className="file-actions">
-                  {(isDownloading || (file.id && !file.id.startsWith('temp-'))) && (
+                  {(isDownloading || (!isComplete && file.id && !file.id.startsWith('temp-'))) && (
                     <ProgressiveDownload
                       downloadStatus={downloadStatus}
                       setDownloadStatus={setDownloadStatus}
