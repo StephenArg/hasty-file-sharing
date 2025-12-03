@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import ProgressiveDownload from './ProgressiveDownload';
 
 const FileList = ({ files, onDelete }) => {
   const [copiedId, setCopiedId] = useState(null);
+  const [fileInfo, setFileInfo] = useState({});
 
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 Bytes';
@@ -20,6 +22,47 @@ const FileList = ({ files, onDelete }) => {
     const baseUrl = window.location.origin;
     return `${baseUrl}/api/download/${fileId}`;
   };
+
+  const getPieceUrl = (fileId, pieceIndex) => {
+    const baseUrl = window.location.origin;
+    return `${baseUrl}/api/download/${fileId}?piece=${pieceIndex}`;
+  };
+
+  const fetchFileInfo = async (fileId) => {
+    try {
+      const response = await fetch(`/api/download/${fileId}/info`);
+      const data = await response.json();
+      setFileInfo(prev => ({
+        ...prev,
+        [fileId]: data
+      }));
+    } catch (err) {
+      console.error('Error fetching file info:', err);
+    }
+  };
+
+  useEffect(() => {
+    // Fetch info for all files
+    files.forEach(file => {
+      if (!fileInfo[file.id]) {
+        fetchFileInfo(file.id);
+      }
+    });
+  }, [files]);
+
+  useEffect(() => {
+    // Set up polling for incomplete files
+    const interval = setInterval(() => {
+      files.forEach(file => {
+        const info = fileInfo[file.id];
+        if (!info || (info.completePieces < info.totalPieces)) {
+          fetchFileInfo(file.id);
+        }
+      });
+    }, 2000); // Poll every 2 seconds
+
+    return () => clearInterval(interval);
+  }, [files, fileInfo]);
 
   const copyToClipboard = async (fileId) => {
     const url = getDownloadUrl(fileId);
@@ -57,48 +100,104 @@ const FileList = ({ files, onDelete }) => {
   return (
     <div className="files-list">
       <h2>Uploaded Files ({files.length})</h2>
-      {files.map((file) => (
-        <div key={file.id} className="file-item">
-          <div className="file-info">
-            <div className="file-name">{file.original_filename || file.filename}</div>
-            <div className="file-meta">
-              {formatFileSize(file.size)} • {file.total_pieces} pieces • {formatDate(file.created_at)}
+      {files.map((file) => {
+        const info = fileInfo[file.id];
+        const isComplete = !info || info.completePieces === info.totalPieces;
+        const completionPercent = info ? Math.round((info.completePieces / info.totalPieces) * 100) : 100;
+
+        return (
+          <div key={file.id} className="file-item">
+            <div className="file-info">
+              <div className="file-name">
+                {file.original_filename || file.filename}
+                {!isComplete && <span className="file-status-badge uploading">Uploading...</span>}
+              </div>
+              <div className="file-meta">
+                {formatFileSize(file.size)} • {file.total_pieces} pieces • {formatDate(file.created_at)}
+                {info && (
+                  <span className="file-completion">
+                    {' • '}{info.completePieces}/{info.totalPieces} pieces ready ({completionPercent}%)
+                  </span>
+                )}
+              </div>
+              {!isComplete && info && (
+                <div className="file-upload-progress">
+                  <div className="file-upload-progress-bar">
+                    <div 
+                      className="file-upload-progress-fill"
+                      style={{ width: `${completionPercent}%` }}
+                    ></div>
+                  </div>
+                </div>
+              )}
+              <div className="copy-link">
+                <input
+                  type="text"
+                  className="link-input"
+                  value={getDownloadUrl(file.id)}
+                  readOnly
+                />
+                <button
+                  className={`btn btn-small ${copiedId === file.id ? 'btn-success' : 'btn-primary'}`}
+                  onClick={() => copyToClipboard(file.id)}
+                >
+                  {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
+                </button>
+              </div>
+              {!isComplete && info && (
+                <div className="piece-downloads">
+                  <details>
+                    <summary>Download Available Pieces ({info.completePieces}/{info.totalPieces})</summary>
+                    <div className="pieces-list">
+                      {info.pieces.filter(p => p.isComplete).map(piece => (
+                        <a
+                          key={piece.index}
+                          href={getPieceUrl(file.id, piece.index)}
+                          className="piece-link"
+                          download={`${file.original_filename || file.filename}.piece${piece.index}`}
+                        >
+                          Piece {piece.index} ({formatFileSize(piece.size)})
+                        </a>
+                      ))}
+                    </div>
+                  </details>
+                </div>
+              )}
             </div>
-            <div className="copy-link">
-              <input
-                type="text"
-                className="link-input"
-                value={getDownloadUrl(file.id)}
-                readOnly
+            <div className="file-actions">
+              <ProgressiveDownload
+                fileId={file.id}
+                filename={file.original_filename || file.filename}
+                fileInfo={info}
+                onComplete={() => {
+                  // Refresh file info after download completes
+                  fetchFileInfo(file.id);
+                }}
               />
+              {isComplete && (
+                <button
+                  className="btn btn-small btn-success"
+                  onClick={() => handleDownload(file.id, file.original_filename || file.filename)}
+                  style={{ marginLeft: '5px' }}
+                >
+                  ⬇️ Direct Download
+                </button>
+              )}
               <button
-                className={`btn btn-small ${copiedId === file.id ? 'btn-success' : 'btn-primary'}`}
-                onClick={() => copyToClipboard(file.id)}
+                className="btn btn-small btn-danger"
+                onClick={() => {
+                  if (window.confirm('Are you sure you want to delete this file?')) {
+                    onDelete(file.id);
+                  }
+                }}
+                style={{ marginLeft: '5px' }}
               >
-                {copiedId === file.id ? '✓ Copied' : '📋 Copy Link'}
+                🗑️ Delete
               </button>
             </div>
           </div>
-          <div className="file-actions">
-            <button
-              className="btn btn-small btn-success"
-              onClick={() => handleDownload(file.id, file.original_filename || file.filename)}
-            >
-              ⬇️ Download
-            </button>
-            <button
-              className="btn btn-small btn-danger"
-              onClick={() => {
-                if (window.confirm('Are you sure you want to delete this file?')) {
-                  onDelete(file.id);
-                }
-              }}
-            >
-              🗑️ Delete
-            </button>
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 };

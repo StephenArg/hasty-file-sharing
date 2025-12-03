@@ -110,13 +110,6 @@ function App() {
         storageStats={storageStats}
       />
 
-      {loading && (
-        <div className="loading">
-          <div className="spinner"></div>
-          <p>Uploading files...</p>
-        </div>
-      )}
-
       <FileList files={files} onDelete={handleDelete} />
     </div>
   );
