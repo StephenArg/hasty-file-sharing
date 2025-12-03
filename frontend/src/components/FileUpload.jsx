@@ -18,11 +18,14 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
   // Alias for consistency with other components
   const formatBytes = formatFileSize;
 
-  const uploadFileWithProgress = (file, index, totalFiles) => {
+  const uploadFileWithProgress = (file, index, totalFiles, fileId = null) => {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       const formData = new FormData();
       formData.append('files', file);
+      if (fileId) {
+        formData.append('fileId', fileId);
+      }
 
       const startTime = Date.now();
       let lastUpdateTime = startTime;
@@ -142,14 +145,61 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
     })));
 
     try {
+      // First, initialize all file entries in the backend (creates file entries immediately)
+      const initPromises = filesArray.map(async (file, i) => {
+        try {
+          const mimeType = file.type || 'application/octet-stream';
+          const response = await fetch('/api/upload/chunk/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              filename: file.name,
+              size: file.size,
+              mimeType
+            })
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            // Notify that file entry was created - file is now available for download
+            if (onFileStart && data.success) {
+              onFileStart({
+                id: data.fileId,
+                filename: file.name,
+                size: file.size,
+                totalPieces: data.totalPieces,
+                pieceSize: data.pieceSize,
+                uploadComplete: false // Still uploading
+              });
+            }
+            return { success: true, fileId: data.fileId, file, index: i, initData: data };
+          } else {
+            throw new Error('Failed to initialize file');
+          }
+        } catch (err) {
+          console.error(`Failed to initialize ${file.name}:`, err);
+          return { success: false, error: err, file, index: i };
+        }
+      });
+
+      const initResults = await Promise.all(initPromises);
+      
+      // Create a map of filename to fileId for the upload
+      const fileIdMap = new Map();
+      initResults.forEach(initResult => {
+        if (initResult.success && initResult.fileId) {
+          fileIdMap.set(initResult.file.name, initResult.fileId);
+        }
+      });
+      
+      // Now upload files using the regular endpoint (which will update the existing entries)
       // Upload files in parallel to see progress for all files simultaneously
-      // Note: onFileStart is called immediately when each file upload completes
-      // (inside uploadFileWithProgress), so files appear in list as they finish
-      const uploadPromises = filesArray.map((file, i) => 
-        uploadFileWithProgress(file, i, filesArray.length)
+      const uploadPromises = filesArray.map((file, i) => {
+        const fileId = fileIdMap.get(file.name);
+        return uploadFileWithProgress(file, i, filesArray.length, fileId)
           .then(result => ({ success: true, result, index: i }))
           .catch(err => ({ success: false, error: err, index: i, filename: file.name }))
-      );
+      });
 
       const uploadResults = await Promise.all(uploadPromises);
       const results = [];
@@ -158,6 +208,19 @@ const FileUpload = ({ onSuccess, onError, onLoadingChange, onUploadProgress, onF
         if (uploadResult.success && uploadResult.result) {
           if (uploadResult.result.success && uploadResult.result.files) {
             results.push(...uploadResult.result.files);
+            // Update file status to complete
+            uploadResult.result.files.forEach(fileData => {
+              if (onFileStart) {
+                onFileStart({
+                  id: fileData.id,
+                  filename: fileData.filename,
+                  size: fileData.size,
+                  totalPieces: fileData.totalPieces,
+                  pieceSize: fileData.pieceSize,
+                  uploadComplete: true
+                });
+              }
+            });
           } else {
             console.warn('Upload result missing files:', uploadResult.result);
           }

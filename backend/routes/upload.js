@@ -99,7 +99,20 @@ router.post('/files', upload.array('files'), async (req, res) => {
     const results = [];
     
     for (const file of req.files) {
-      const fileId = uuidv4();
+      // Check if file was pre-initialized (via chunk/init)
+      // If so, use that fileId; otherwise create new one
+      // Note: multer puts form fields in req.body, but fileId might be in the form data
+      let fileId = req.body.fileId || (Array.isArray(req.body.fileId) ? req.body.fileId[0] : null);
+      let existingFile = null;
+      
+      if (fileId) {
+        existingFile = await db.getFileById(fileId);
+      }
+      
+      if (!existingFile) {
+        fileId = uuidv4();
+      }
+      
       const fileExtension = path.extname(file.originalname);
       const finalFilename = `${fileId}${fileExtension}`;
       const finalPath = path.join(UPLOADS_DIR, finalFilename);
@@ -114,35 +127,71 @@ router.post('/files', upload.array('files'), async (req, res) => {
       const pieceSize = getPieceSize(fileSize);
       const totalPieces = Math.ceil(fileSize / pieceSize);
       
-      // Create file entry immediately (before processing)
-      await db.createFile({
-        id: fileId,
-        filename: finalFilename,
-        originalFilename: file.originalname,
-        size: fileSize,
-        pieceSize,
-        totalPieces,
-        mimeType: mimeTypes.lookup(file.originalname) || 'application/octet-stream',
-        filePath: finalPath
-      });
-      
-      // Create piece entries (initially incomplete)
-      const dbPieces = [];
-      for (let i = 0; i < totalPieces; i++) {
-        const offset = i * pieceSize;
-        const remainingBytes = fileSize - offset;
-        const currentPieceSize = Math.min(pieceSize, remainingBytes);
-        
-        dbPieces.push({
-          fileId,
-          pieceIndex: i,
-          hash: '', // Will be set during processing
-          size: currentPieceSize,
-          offset,
-          isComplete: 0
+      // Create or update file entry
+      if (!existingFile) {
+        await db.createFile({
+          id: fileId,
+          filename: finalFilename,
+          originalFilename: file.originalname,
+          size: fileSize,
+          pieceSize,
+          totalPieces,
+          mimeType: mimeTypes.lookup(file.originalname) || 'application/octet-stream',
+          filePath: finalPath
         });
+        
+        // Create piece entries (initially incomplete)
+        const dbPieces = [];
+        for (let i = 0; i < totalPieces; i++) {
+          const offset = i * pieceSize;
+          const remainingBytes = fileSize - offset;
+          const currentPieceSize = Math.min(pieceSize, remainingBytes);
+          
+          dbPieces.push({
+            fileId,
+            pieceIndex: i,
+            hash: '', // Will be set during processing
+            size: currentPieceSize,
+            offset,
+            isComplete: 0
+          });
+        }
+        await db.createPieces(dbPieces);
+      } else {
+        // Update existing file entry with actual size and ensure pieces exist
+        const database = require('../database').getDB();
+        await new Promise((resolve, reject) => {
+          database.run(
+            `UPDATE files SET size = ?, piece_size = ?, total_pieces = ? WHERE id = ?`,
+            [fileSize, pieceSize, totalPieces, fileId],
+            (err) => {
+              if (err) reject(err);
+              else resolve();
+            }
+          );
+        });
+        
+        // Check if pieces exist, if not create them
+        const existingPieces = await db.getPiecesByFileId(fileId);
+        if (existingPieces.length === 0) {
+          const dbPieces = [];
+          for (let i = 0; i < totalPieces; i++) {
+            const offset = i * pieceSize;
+            const remainingBytes = fileSize - offset;
+            const currentPieceSize = Math.min(pieceSize, remainingBytes);
+            
+            dbPieces.push({
+              fileId,
+              pieceIndex: i,
+              hash: '', // Will be set during processing
+              size: currentPieceSize,
+              offset,
+              isComplete: 0
+            });
+          }
+          await db.createPieces(dbPieces);
+        }
       }
-      await db.createPieces(dbPieces);
       
       // Return immediately so file appears in list
       results.push({
