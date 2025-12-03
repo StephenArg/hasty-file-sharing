@@ -1,0 +1,32 @@
+{
+  "name": "hasty-file-send",
+  "version": "1.0.0",
+  "description": "Self-hosted file sharing application with torrent-like chunking",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "nodemon backend/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "multer": "^1.4.5-lts.1",
+    "sqlite3": "^5.1.6",
+    "crypto": "^1.0.1",
+    "archiver": "^6.0.1",
+    "uuid": "^9.0.1",
+    "mime-types": "^2.1.35"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": [
+    "file-sharing",
+    "self-hosted",
+    "torrent",
+    "chunking"
+  ],
+  "author": "",
+  "license": "MIT"
+}
+
