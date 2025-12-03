@@ -169,7 +169,10 @@ export class WebSocketDownloadManager {
       wsClient.on('DOWNLOAD_CHUNK', chunkHandler);
 
       // Store handlers for cleanup
-      this.activeDownloads.get(fileId)?.handlers = { initHandler, chunkHandler };
+      const download = this.activeDownloads.get(fileId);
+      if (download) {
+        download.handlers = { initHandler, chunkHandler };
+      }
     } catch (err) {
       console.error('Download error:', err);
       throw err;
