@@ -210,14 +210,11 @@ router.post('/files', upload.array('files'), async (req, res) => {
           }
           await db.createPieces(dbPieces);
         } else {
-          // Pieces exist and count matches, but reset them to incomplete
-          // in case the upload is restarting
-          console.log(`Resetting ${existingPieces.length} pieces to incomplete for ${fileId}`);
-          await Promise.all(
-            existingPieces.map(p => 
-              db.updatePieceComplete(fileId, p.piece_index, false)
-            )
-          );
+          // Pieces exist and count matches
+          // Don't reset them - if they're already complete, keep them complete
+          // Only reset if we're sure this is a restart (which we can't easily detect)
+          // Instead, let the background processing handle updating them
+          console.log(`[${fileId}] Pieces already exist (${existingPieces.length}), will update during processing`);
         }
       }
       
@@ -233,30 +230,58 @@ router.post('/files', upload.array('files'), async (req, res) => {
       
       // Process file into pieces in the background (async, don't await)
       // Use the actual piece size from the file entry to ensure consistency
-      processFile(finalPath, pieceSize)
-        .then(({ pieces }) => {
-          console.log(`Processing ${pieces.length} pieces for ${fileId}`);
-          // Update pieces with hashes and mark as complete
-          return Promise.all(pieces.map(piece => 
-            Promise.all([
-              db.updatePieceHash(fileId, piece.pieceIndex, piece.hash).catch(err => {
-                console.error(`Error updating hash for piece ${piece.pieceIndex} of ${fileId}:`, err);
-                throw err;
-              }),
-              db.updatePieceComplete(fileId, piece.pieceIndex, true).catch(err => {
-                console.error(`Error marking piece ${piece.pieceIndex} complete for ${fileId}:`, err);
-                throw err;
-              })
-            ])
-          ));
-        })
-        .then(() => {
-          console.log(`Successfully processed all pieces for ${fileId}`);
-        })
-        .catch(err => {
-          console.error(`Error processing file ${fileId}:`, err);
-          console.error(err.stack);
-        });
+      // Add a small delay to ensure database pieces are created first
+      setTimeout(() => {
+        processFile(finalPath, pieceSize)
+          .then(async ({ pieces }) => {
+            console.log(`[${fileId}] Starting to process ${pieces.length} pieces`);
+            
+            // First, verify pieces exist in database
+            const dbPieces = await db.getPiecesByFileId(fileId);
+            if (dbPieces.length === 0) {
+              console.error(`[${fileId}] No pieces found in database! Creating them now...`);
+              // Create pieces if they don't exist
+              const dbPiecesToCreate = pieces.map(piece => ({
+                fileId,
+                pieceIndex: piece.pieceIndex,
+                hash: piece.hash,
+                size: piece.size,
+                offset: piece.offset,
+                isComplete: 1 // Mark as complete since we're processing them
+              }));
+              await db.createPieces(dbPiecesToCreate);
+              console.log(`[${fileId}] Created ${dbPiecesToCreate.length} pieces and marked as complete`);
+              return;
+            }
+            
+            if (dbPieces.length !== pieces.length) {
+              console.warn(`[${fileId}] Piece count mismatch: DB has ${dbPieces.length}, file has ${pieces.length}`);
+            }
+            
+            // Update pieces with hashes and mark as complete
+            let successCount = 0;
+            let errorCount = 0;
+            
+            for (const piece of pieces) {
+              try {
+                await Promise.all([
+                  db.updatePieceHash(fileId, piece.pieceIndex, piece.hash),
+                  db.updatePieceComplete(fileId, piece.pieceIndex, true)
+                ]);
+                successCount++;
+              } catch (err) {
+                console.error(`[${fileId}] Error updating piece ${piece.pieceIndex}:`, err);
+                errorCount++;
+              }
+            }
+            
+            console.log(`[${fileId}] Processed ${successCount}/${pieces.length} pieces successfully${errorCount > 0 ? `, ${errorCount} errors` : ''}`);
+          })
+          .catch(err => {
+            console.error(`[${fileId}] Error processing file:`, err);
+            console.error(err.stack);
+          });
+      }, 500); // Small delay to ensure database operations complete
     }
     
     res.json({ 
