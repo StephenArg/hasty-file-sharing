@@ -74,14 +74,28 @@ export class WebSocketDownloadManager {
 
         // Track download
         const receivedChunks = new Set();
+        let writableStream = null;
+        
+        // Create writable stream once and keep it open
+        if (partFileHandle) {
+          try {
+            writableStream = await partFileHandle.createWritable({ keepExistingData: true });
+          } catch (err) {
+            console.error('Error creating writable stream:', err);
+          }
+        }
+        
         const downloadInfo = {
           partFileHandle,
+          writableStream, // Keep stream open for all writes
           receivedChunks,
           totalPieces,
           filename: fn,
           size,
           onProgress,
-          onComplete
+          onComplete,
+          lastSaveTime: Date.now(),
+          pendingSave: false
         };
         this.activeDownloads.set(id, downloadInfo);
 
@@ -121,13 +135,10 @@ export class WebSocketDownloadManager {
           return;
         }
 
-        // Decode base64 data - use more efficient method
-        // Convert base64 to binary string, then to Uint8Array
+        // Decode base64 data - optimized method
+        // Use Uint8Array.from with atob for better performance
         const binaryString = atob(data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0; i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
+        const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
         
         // Verify hash if provided (critical for data integrity)
         if (hash) {
@@ -145,22 +156,26 @@ export class WebSocketDownloadManager {
         }
 
         // Write chunk to .part file at correct offset
-        if (download.partFileHandle) {
+        if (download.writableStream) {
           try {
-            // Use File System Access API to write at specific offset
-            const writable = await download.partFileHandle.createWritable({ keepExistingData: true });
-            
-            // Seek to offset and write using the correct API
-            await writable.seek(offset);
-            // Write the bytes directly (FileSystemWritableFileStream.write accepts Blob, BufferSource, or string)
-            await writable.write(bytes);
-            await writable.close();
-            
-            // Verify the write by reading back (optional, but helps catch issues)
-            // Note: This adds overhead, so we'll rely on hash verification instead
+            // Use existing writable stream - much faster than creating new one
+            await download.writableStream.seek(offset);
+            await download.writableStream.write(bytes);
+            // Don't close - keep stream open for next chunk
           } catch (err) {
             console.error(`Error writing chunk ${chunkIndex} to file:`, err);
             // Fallback: store in IndexedDB
+            await this.saveChunk(id, chunkIndex, bytes, offset);
+          }
+        } else if (download.partFileHandle) {
+          // Fallback: create stream if not exists (shouldn't happen normally)
+          try {
+            const writable = await download.partFileHandle.createWritable({ keepExistingData: true });
+            await writable.seek(offset);
+            await writable.write(bytes);
+            download.writableStream = writable; // Store for future chunks
+          } catch (err) {
+            console.error(`Error writing chunk ${chunkIndex} to file:`, err);
             await this.saveChunk(id, chunkIndex, bytes, offset);
           }
         } else {
@@ -182,13 +197,25 @@ export class WebSocketDownloadManager {
           });
         }
 
-        // Save download info (without file handle - can't serialize)
-        await this.saveDownloadInfo(id, {
-          filename: download.filename,
-          totalPieces: download.totalPieces,
-          receivedChunks: Array.from(download.receivedChunks),
-          size: download.size
-        });
+        // Batch IndexedDB saves - only save every 10 chunks or every 2 seconds
+        const now = Date.now();
+        const shouldSave = download.receivedChunks.size % 10 === 0 || 
+                          (now - download.lastSaveTime > 2000) ||
+                          download.receivedChunks.size === download.totalPieces;
+        
+        if (shouldSave && !download.pendingSave) {
+          download.pendingSave = true;
+          download.lastSaveTime = now;
+          // Save asynchronously without blocking
+          this.saveDownloadInfo(id, {
+            filename: download.filename,
+            totalPieces: download.totalPieces,
+            receivedChunks: Array.from(download.receivedChunks),
+            size: download.size
+          }).finally(() => {
+            download.pendingSave = false;
+          });
+        }
 
         // Check if download is complete
         if (download.receivedChunks.size === download.totalPieces) {
@@ -215,6 +242,15 @@ export class WebSocketDownloadManager {
    */
   async completeDownload(fileId, download) {
     try {
+      // Close writable stream if open
+      if (download.writableStream) {
+        try {
+          await download.writableStream.close();
+        } catch (err) {
+          console.warn('Error closing writable stream:', err);
+        }
+      }
+      
       if (download.partFileHandle) {
         // Get directory handle
         const directoryHandle = await download.partFileHandle.getParent();
@@ -400,6 +436,15 @@ export class WebSocketDownloadManager {
   async cancelDownload(fileId) {
     if (this.activeDownloads.has(fileId)) {
       const download = this.activeDownloads.get(fileId);
+      
+      // Close writable stream if open
+      if (download.writableStream) {
+        try {
+          await download.writableStream.close();
+        } catch (err) {
+          console.warn('Error closing writable stream on cancel:', err);
+        }
+      }
       
       // Remove handlers
       if (download.handlers) {

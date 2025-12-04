@@ -10,8 +10,10 @@ const { verifyToken, isAuthRequired } = require('./middleware/auth');
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, '../uploads');
 
 // Track active uploads and downloads
-const activeUploads = new Map(); // fileId -> { filePath, writeStream, uploadedChunks: Set, totalPieces, pieceSize }
+const activeUploads = new Map(); // fileId -> { filePath, fileHandle, uploadedChunks: Set, totalPieces, pieceSize }
 const activeDownloads = new Map(); // fileId -> Set<WebSocket>
+// Cache file handles and piece data for downloads to avoid repeated opens/queries
+const downloadCache = new Map(); // fileId -> { fileHandle, pieces: Array, lastAccess: timestamp }
 
 /**
  * Initialize WebSocket server
@@ -167,17 +169,20 @@ async function handleUploadInit(ws, payload) {
     }
     await db.createPieces(dbPieces);
 
-    // Create empty file
-    await fs.writeFile(finalPath, Buffer.alloc(0));
+    // Create empty file and open file handle (keep it open for all writes)
+    const fileHandle = await fs.open(finalPath, 'w+');
 
-    // Track upload session
+    // Track upload session with open file handle
     activeUploads.set(fileId, {
       filePath: finalPath,
+      fileHandle, // Keep file handle open
       uploadedChunks: new Set(),
       totalPieces,
       pieceSize,
       size,
-      ws
+      ws,
+      lastSync: Date.now(),
+      pendingSync: false
     });
 
     // Send confirmation (echo back requestId and file info for matching)
@@ -231,33 +236,75 @@ async function handleUploadChunk(ws, payload) {
     // Calculate offset
     const offset = chunkIndex * upload.pieceSize;
 
-    // Write chunk to file at correct offset
-    // Use fs.promises for proper async file writing
-    const fd = await require('fs').promises.open(upload.filePath, 'r+');
-    try {
-      // FileHandle.write() signature: (buffer, offset?, length?, position?)
-      // We want to write chunkData at position 'offset'
-      // offset=0 means start from beginning of buffer, length=chunkData.length, position=file offset
-      const result = await fd.write(chunkData, 0, chunkData.length, offset);
-      
-      // Verify bytes written
-      if (result.bytesWritten !== chunkData.length) {
-        throw new Error(`Only wrote ${result.bytesWritten} of ${chunkData.length} bytes`);
-      }
-      
-      await fd.sync(); // Ensure data is written to disk
-    } finally {
-      await fd.close();
+    // Write chunk to file using cached file handle (much faster)
+    const result = await upload.fileHandle.write(chunkData, 0, chunkData.length, offset);
+    
+    // Verify bytes written
+    if (result.bytesWritten !== chunkData.length) {
+      throw new Error(`Only wrote ${result.bytesWritten} of ${chunkData.length} bytes`);
+    }
+    
+    // Batch sync operations - only sync every 10 chunks or every 2 seconds
+    const now = Date.now();
+    const shouldSync = upload.uploadedChunks.size % 10 === 0 || 
+                      (now - upload.lastSync > 2000) ||
+                      upload.uploadedChunks.size === upload.totalPieces - 1;
+    
+    if (shouldSync && !upload.pendingSync) {
+      upload.pendingSync = true;
+      upload.lastSync = now;
+      // Sync asynchronously without blocking
+      upload.fileHandle.sync().finally(() => {
+        upload.pendingSync = false;
+      });
     }
 
-    // Update piece in database
-    await Promise.all([
-      db.updatePieceHash(fileId, chunkIndex, actualHash),
-      db.updatePieceComplete(fileId, chunkIndex, true)
-    ]);
+    // Update piece in database - batch updates every 10 chunks for better performance
+    // Track which chunks have been updated in DB
+    if (!upload.updatedInDB) {
+      upload.updatedInDB = new Set();
+    }
+    
+    const shouldUpdateDB = upload.uploadedChunks.size % 10 === 0 || 
+                          upload.uploadedChunks.size === upload.totalPieces;
+    
+    if (shouldUpdateDB) {
+      // Update all chunks that haven't been updated yet
+      const chunksToUpdate = Array.from(upload.uploadedChunks).filter(
+        idx => !upload.updatedInDB.has(idx)
+      );
+      
+      if (chunksToUpdate.length > 0) {
+        await Promise.all(
+          chunksToUpdate.map(idx => {
+            const hash = upload.chunkHashes?.get(idx) || actualHash;
+            upload.updatedInDB.add(idx);
+            return Promise.all([
+              db.updatePieceHash(fileId, idx, hash),
+              db.updatePieceComplete(fileId, idx, true)
+            ]);
+          })
+        );
+      }
+    } else {
+      // Update current chunk immediately if not already updated
+      if (!upload.updatedInDB.has(chunkIndex)) {
+        await Promise.all([
+          db.updatePieceHash(fileId, chunkIndex, actualHash),
+          db.updatePieceComplete(fileId, chunkIndex, true)
+        ]);
+        upload.updatedInDB.add(chunkIndex);
+      }
+    }
 
     // Track uploaded chunk
     upload.uploadedChunks.add(chunkIndex);
+    
+    // Store hash for this chunk (needed for batch updates)
+    if (!upload.chunkHashes) {
+      upload.chunkHashes = new Map();
+    }
+    upload.chunkHashes.set(chunkIndex, actualHash);
 
     // Send confirmation
     ws.send(JSON.stringify({
@@ -277,6 +324,26 @@ async function handleUploadChunk(ws, payload) {
 
     // Check if upload is complete
     if (upload.uploadedChunks.size === upload.totalPieces) {
+      // Final sync before closing
+      await upload.fileHandle.sync();
+      await upload.fileHandle.close();
+      
+      // Update any remaining pieces in database that haven't been updated yet
+      const allChunks = Array.from(upload.uploadedChunks);
+      const pendingChunks = allChunks.filter(idx => !upload.updatedInDB?.has(idx));
+      
+      if (pendingChunks.length > 0) {
+        await Promise.all(
+          pendingChunks.map(idx => {
+            const hash = upload.chunkHashes?.get(idx) || actualHash;
+            return Promise.all([
+              db.updatePieceHash(fileId, idx, hash),
+              db.updatePieceComplete(fileId, idx, true)
+            ]);
+          })
+        );
+      }
+      
       activeUploads.delete(fileId);
 
       ws.send(JSON.stringify({
@@ -361,48 +428,56 @@ async function handleDownloadRequest(ws, payload) {
       return;
     }
 
-    const file = await db.getFileById(fileId);
-    if (!file) {
-      sendError(ws, 'FILE_NOT_FOUND', 'File not found');
-      return;
+    // Get or create cached file handle and pieces
+    let cache = downloadCache.get(fileId);
+    if (!cache) {
+      const file = await db.getFileById(fileId);
+      if (!file) {
+        sendError(ws, 'FILE_NOT_FOUND', 'File not found');
+        return;
+      }
+
+      const pieces = await db.getPiecesByFileId(fileId);
+      const fd = await require('fs').promises.open(file.file_path, 'r');
+      
+      cache = {
+        fileHandle: fd,
+        pieces: pieces.filter(p => p.is_complete === 1),
+        lastAccess: Date.now()
+      };
+      downloadCache.set(fileId, cache);
+    } else {
+      cache.lastAccess = Date.now();
     }
 
-    const pieces = await db.getPiecesByFileId(fileId);
-    const piece = pieces.find(p => p.piece_index === chunkIndex && p.is_complete === 1);
-
+    const piece = cache.pieces.find(p => p.piece_index === chunkIndex);
     if (!piece) {
       sendError(ws, 'CHUNK_NOT_AVAILABLE', 'Chunk not available');
       return;
     }
 
-    // Read chunk from file
-    const fd = await require('fs').promises.open(file.file_path, 'r');
-    try {
-      const buffer = Buffer.alloc(piece.size);
-      const result = await fd.read(buffer, 0, piece.size, piece.offset);
-      
-      // Verify bytes read
-      if (result.bytesRead !== piece.size) {
-        sendError(ws, 'READ_ERROR', `Only read ${result.bytesRead} of ${piece.size} bytes`);
-        await fd.close();
-        return;
-      }
-
-      // Send chunk
-      ws.send(JSON.stringify({
-        type: 'DOWNLOAD_CHUNK',
-        payload: {
-          fileId,
-          chunkIndex: piece.piece_index,
-          data: buffer.toString('base64'),
-          hash: piece.hash,
-          size: piece.size,
-          offset: piece.offset
-        }
-      }));
-    } finally {
-      await fd.close();
+    // Read chunk from cached file handle
+    const buffer = Buffer.alloc(piece.size);
+    const result = await cache.fileHandle.read(buffer, 0, piece.size, piece.offset);
+    
+    // Verify bytes read
+    if (result.bytesRead !== piece.size) {
+      sendError(ws, 'READ_ERROR', `Only read ${result.bytesRead} of ${piece.size} bytes`);
+      return;
     }
+
+    // Send chunk
+    ws.send(JSON.stringify({
+      type: 'DOWNLOAD_CHUNK',
+      payload: {
+        fileId,
+        chunkIndex: piece.piece_index,
+        data: buffer.toString('base64'),
+        hash: piece.hash,
+        size: piece.size,
+        offset: piece.offset
+      }
+    }));
   } catch (err) {
     console.error('Download request error:', err);
     sendError(ws, 'DOWNLOAD_REQUEST_ERROR', err.message);
@@ -425,10 +500,18 @@ async function handleDownloadCancel(ws, payload) {
 /**
  * Clean up connection
  */
-function cleanupConnection(ws) {
+async function cleanupConnection(ws) {
   // Remove from active uploads
   for (const [fileId, upload] of activeUploads.entries()) {
     if (upload.ws === ws) {
+      // Close file handle if open
+      if (upload.fileHandle) {
+        try {
+          await upload.fileHandle.close();
+        } catch (err) {
+          console.error(`Error closing upload file handle for ${fileId}:`, err);
+        }
+      }
       activeUploads.delete(fileId);
     }
   }
@@ -438,6 +521,31 @@ function cleanupConnection(ws) {
     downloadSet.delete(ws);
     if (downloadSet.size === 0) {
       activeDownloads.delete(fileId);
+      // Close cached file handle if exists
+      const cache = downloadCache.get(fileId);
+      if (cache && cache.fileHandle) {
+        try {
+          await cache.fileHandle.close();
+        } catch (err) {
+          console.error(`Error closing download cache file handle for ${fileId}:`, err);
+        }
+        downloadCache.delete(fileId);
+      }
+    }
+  }
+  
+  // Clean up stale cache entries (older than 5 minutes)
+  const now = Date.now();
+  for (const [fileId, cache] of downloadCache.entries()) {
+    if (now - cache.lastAccess > 5 * 60 * 1000) {
+      if (cache.fileHandle) {
+        try {
+          await cache.fileHandle.close();
+        } catch (err) {
+          console.error(`Error closing stale cache file handle for ${fileId}:`, err);
+        }
+      }
+      downloadCache.delete(fileId);
     }
   }
 }
