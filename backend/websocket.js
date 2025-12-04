@@ -99,7 +99,13 @@ async function handleMessage(ws, message) {
       break;
     case 'DOWNLOAD_REQUEST':
       // Downloads are public - no auth check
-      await handleDownloadRequest(ws, payload);
+      // Support both single and batch requests
+      if (Array.isArray(payload.chunkIndices)) {
+        // Batch request - process in parallel
+        handleBatchDownloadRequest(ws, payload);
+      } else {
+        await handleDownloadRequest(ws, payload);
+      }
       break;
     case 'DOWNLOAD_CANCEL':
       // Downloads are public - no auth check
@@ -417,71 +423,100 @@ async function handleDownloadInit(ws, payload) {
 }
 
 /**
- * Handle chunk download request
+ * Handle chunk download request - optimized for parallel processing
  */
 async function handleDownloadRequest(ws, payload) {
-  try {
-    const { fileId, chunkIndex } = payload;
+  // Process asynchronously to allow parallel requests
+  (async () => {
+    try {
+      const { fileId, chunkIndex } = payload;
 
-    if (!fileId || chunkIndex === undefined) {
-      sendError(ws, 'DOWNLOAD_REQUEST_ERROR', 'Missing required fields');
-      return;
-    }
-
-    // Get or create cached file handle and pieces
-    let cache = downloadCache.get(fileId);
-    if (!cache) {
-      const file = await db.getFileById(fileId);
-      if (!file) {
-        sendError(ws, 'FILE_NOT_FOUND', 'File not found');
+      if (!fileId || chunkIndex === undefined) {
+        sendError(ws, 'DOWNLOAD_REQUEST_ERROR', 'Missing required fields');
         return;
       }
 
-      const pieces = await db.getPiecesByFileId(fileId);
-      const fd = await require('fs').promises.open(file.file_path, 'r');
-      
-      cache = {
-        fileHandle: fd,
-        pieces: pieces.filter(p => p.is_complete === 1),
-        lastAccess: Date.now()
-      };
-      downloadCache.set(fileId, cache);
-    } else {
-      cache.lastAccess = Date.now();
-    }
+      // Get or create cached file handle and pieces
+      let cache = downloadCache.get(fileId);
+      if (!cache) {
+        const file = await db.getFileById(fileId);
+        if (!file) {
+          sendError(ws, 'FILE_NOT_FOUND', 'File not found');
+          return;
+        }
 
-    const piece = cache.pieces.find(p => p.piece_index === chunkIndex);
-    if (!piece) {
-      sendError(ws, 'CHUNK_NOT_AVAILABLE', 'Chunk not available');
-      return;
-    }
-
-    // Read chunk from cached file handle
-    const buffer = Buffer.alloc(piece.size);
-    const result = await cache.fileHandle.read(buffer, 0, piece.size, piece.offset);
-    
-    // Verify bytes read
-    if (result.bytesRead !== piece.size) {
-      sendError(ws, 'READ_ERROR', `Only read ${result.bytesRead} of ${piece.size} bytes`);
-      return;
-    }
-
-    // Send chunk
-    ws.send(JSON.stringify({
-      type: 'DOWNLOAD_CHUNK',
-      payload: {
-        fileId,
-        chunkIndex: piece.piece_index,
-        data: buffer.toString('base64'),
-        hash: piece.hash,
-        size: piece.size,
-        offset: piece.offset
+        const pieces = await db.getPiecesByFileId(fileId);
+        const fd = await require('fs').promises.open(file.file_path, 'r');
+        
+        cache = {
+          fileHandle: fd,
+          pieces: pieces.filter(p => p.is_complete === 1),
+          lastAccess: Date.now(),
+          readQueue: [] // Queue for parallel reads
+        };
+        downloadCache.set(fileId, cache);
+      } else {
+        cache.lastAccess = Date.now();
       }
-    }));
-  } catch (err) {
-    console.error('Download request error:', err);
-    sendError(ws, 'DOWNLOAD_REQUEST_ERROR', err.message);
+
+      const piece = cache.pieces.find(p => p.piece_index === chunkIndex);
+      if (!piece) {
+        sendError(ws, 'CHUNK_NOT_AVAILABLE', 'Chunk not available');
+        return;
+      }
+
+      // Read chunk from cached file handle (non-blocking)
+      const buffer = Buffer.alloc(piece.size);
+      const result = await cache.fileHandle.read(buffer, 0, piece.size, piece.offset);
+      
+      // Verify bytes read
+      if (result.bytesRead !== piece.size) {
+        sendError(ws, 'READ_ERROR', `Only read ${result.bytesRead} of ${piece.size} bytes`);
+        return;
+      }
+
+      // Optimize base64 encoding - use native Buffer.toString for better performance
+      // For large chunks, we could stream, but base64 is fast enough for now
+      const base64Data = buffer.toString('base64');
+
+      // Send chunk (non-blocking)
+      ws.send(JSON.stringify({
+        type: 'DOWNLOAD_CHUNK',
+        payload: {
+          fileId,
+          chunkIndex: piece.piece_index,
+          data: base64Data,
+          hash: piece.hash,
+          size: piece.size,
+          offset: piece.offset
+        }
+      }), (err) => {
+        if (err) {
+          console.error(`Error sending chunk ${chunkIndex} for ${fileId}:`, err);
+        }
+      });
+    } catch (err) {
+      console.error('Download request error:', err);
+      sendError(ws, 'DOWNLOAD_REQUEST_ERROR', err.message);
+    }
+  })();
+}
+
+/**
+ * Handle batch chunk download requests - process in parallel
+ */
+function handleBatchDownloadRequest(ws, payload) {
+  const { fileId, chunkIndices } = payload;
+  
+  if (!fileId || !Array.isArray(chunkIndices) || chunkIndices.length === 0) {
+    sendError(ws, 'DOWNLOAD_REQUEST_ERROR', 'Invalid batch request');
+    return;
   }
+  
+  // Process all chunks in parallel (handleDownloadRequest is already async via IIFE)
+  chunkIndices.forEach(chunkIndex => {
+    handleDownloadRequest(ws, { fileId, chunkIndex });
+  });
 }
 
 /**

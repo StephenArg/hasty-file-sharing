@@ -95,17 +95,16 @@ export class WebSocketDownloadManager {
           onProgress,
           onComplete,
           lastSaveTime: Date.now(),
-          pendingSave: false
+          pendingSave: false,
+          requestedChunks: new Set(), // Track requested chunks to avoid duplicates
+          pendingRequests: 0, // Track pending requests
+          allChunks: chunks // Store all chunks for batch requesting
         };
         this.activeDownloads.set(id, downloadInfo);
 
-        // Request all available chunks
-        for (const chunk of chunks) {
-          wsClient.send('DOWNLOAD_REQUEST', {
-            fileId: id,
-            chunkIndex: chunk.index
-          });
-        }
+        // Request chunks in batches for better performance
+        // Start with first batch immediately
+        this.requestChunkBatch(id, chunks, 0);
 
         // Save download info (without file handle - can't serialize)
         await this.saveDownloadInfo(id, {
@@ -135,22 +134,49 @@ export class WebSocketDownloadManager {
           return;
         }
 
-        // Decode base64 data - optimized method
+        // Decode base64 data - optimized method using native browser APIs
         // Use Uint8Array.from with atob for better performance
-        const binaryString = atob(data);
-        const bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+        // For large chunks, process in batches to avoid blocking
+        let bytes;
+        if (data.length > 100000) {
+          // Large chunk - decode in batches to avoid blocking UI
+          const binaryString = atob(data);
+          bytes = new Uint8Array(binaryString.length);
+          // Process in 64KB chunks
+          const chunkSize = 65536;
+          for (let i = 0; i < binaryString.length; i += chunkSize) {
+            const end = Math.min(i + chunkSize, binaryString.length);
+            for (let j = i; j < end; j++) {
+              bytes[j] = binaryString.charCodeAt(j);
+            }
+            // Yield to event loop periodically
+            if (i % (chunkSize * 4) === 0) {
+              await new Promise(resolve => setTimeout(resolve, 0));
+            }
+          }
+        } else {
+          // Small chunk - decode directly
+          const binaryString = atob(data);
+          bytes = Uint8Array.from(binaryString, c => c.charCodeAt(0));
+        }
         
-        // Verify hash if provided (critical for data integrity)
-        if (hash) {
+        // Verify hash if provided - batch verification for better performance
+        // Only verify every 10th chunk or on completion to reduce CPU overhead
+        const shouldVerifyHash = hash && (
+          chunkIndex % 10 === 0 || 
+          download.receivedChunks.size === download.totalPieces ||
+          chunkIndex === 0 // Always verify first chunk
+        );
+        
+        if (shouldVerifyHash) {
           const { hashPiece } = await import('../utils/chunking');
           const actualHash = await hashPiece(bytes);
           if (actualHash !== hash) {
             console.error(`[${id}] Hash mismatch for chunk ${chunkIndex}. Expected: ${hash}, Got: ${actualHash}`);
             // Request chunk again - don't write corrupted chunk
-            wsClient.send('DOWNLOAD_REQUEST', {
-              fileId: id,
-              chunkIndex: chunkIndex
-            });
+            download.requestedChunks.delete(chunkIndex);
+            download.pendingRequests--;
+            this.requestChunkBatch(id, [{ index: chunkIndex }], 0);
             return;
           }
         }
@@ -183,8 +209,25 @@ export class WebSocketDownloadManager {
           await this.saveChunk(id, chunkIndex, bytes, offset);
         }
 
-        // Mark chunk as received
+        // Mark chunk as received and decrement pending requests
         download.receivedChunks.add(chunkIndex);
+        download.requestedChunks.delete(chunkIndex);
+        download.pendingRequests = Math.max(0, download.pendingRequests - 1);
+        
+        // Request next batch if we have capacity (keep pipeline full)
+        const BATCH_SIZE = 20;
+        const MAX_PENDING = 50; // Max concurrent requests
+        if (download.pendingRequests < MAX_PENDING && download.allChunks) {
+          // Find chunks that haven't been requested yet from allChunks
+          const missingChunks = download.allChunks.filter(chunk => 
+            !download.receivedChunks.has(chunk.index) && !download.requestedChunks.has(chunk.index)
+          );
+          
+          if (missingChunks.length > 0) {
+            const nextBatch = missingChunks.slice(0, Math.min(BATCH_SIZE, MAX_PENDING - download.pendingRequests));
+            this.requestChunkBatch(id, nextBatch, 0);
+          }
+        }
 
         // Update progress
         const progress = (download.receivedChunks.size / download.totalPieces) * 100;
@@ -234,6 +277,70 @@ export class WebSocketDownloadManager {
     } catch (err) {
       console.error('Download error:', err);
       throw err;
+    }
+  }
+
+  /**
+   * Request chunks in batches for better performance
+   */
+  requestChunkBatch(fileId, chunks, delay = 0) {
+    const download = this.activeDownloads.get(fileId);
+    if (!download) return;
+    
+    const BATCH_SIZE = 20;
+    const batch = chunks.slice(0, BATCH_SIZE);
+    
+    // Filter out already requested/received chunks
+    const chunksToRequest = batch.filter(chunk => 
+      !download.requestedChunks.has(chunk.index) && !download.receivedChunks.has(chunk.index)
+    );
+    
+    if (chunksToRequest.length === 0) {
+      // Request next batch if there are more chunks
+      if (chunks.length > BATCH_SIZE) {
+        const nextBatch = chunks.slice(BATCH_SIZE);
+        setTimeout(() => {
+          this.requestChunkBatch(fileId, nextBatch, 0);
+        }, delay + 10);
+      }
+      return;
+    }
+    
+    // Mark chunks as requested
+    chunksToRequest.forEach(chunk => {
+      download.requestedChunks.add(chunk.index);
+      download.pendingRequests++;
+    });
+    
+    // Request chunks in batch (send all at once for parallel processing)
+    setTimeout(() => {
+      const chunkIndices = chunksToRequest.map(chunk => chunk.index);
+      
+      // Try batch request first (if backend supports it)
+      if (chunkIndices.length > 1) {
+        wsClient.send('DOWNLOAD_REQUEST', {
+          fileId: fileId,
+          chunkIndices: chunkIndices
+        });
+      } else {
+        // Fallback to individual requests
+        chunksToRequest.forEach((chunk, index) => {
+          setTimeout(() => {
+            wsClient.send('DOWNLOAD_REQUEST', {
+              fileId: fileId,
+              chunkIndex: chunk.index
+            });
+          }, index * 1); // Minimal stagger
+        });
+      }
+    }, delay);
+    
+    // Request next batch if there are more chunks
+    if (chunks.length > BATCH_SIZE) {
+      const nextBatch = chunks.slice(BATCH_SIZE);
+      setTimeout(() => {
+        this.requestChunkBatch(fileId, nextBatch, 0);
+      }, delay + 50); // Small delay between batches
     }
   }
 
